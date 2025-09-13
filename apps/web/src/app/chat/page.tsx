@@ -142,7 +142,7 @@ export default function ChatPage() {
           
           // Profile exists, load conversations
           console.log('Chat page: Profile found, loading conversations');
-          loadConversations();
+          // Note: Conversations will be loaded when socket initializes
         } catch (error) {
           console.error('Profile check error:', error);
           router.push('/username');
@@ -158,13 +158,227 @@ export default function ChatPage() {
     }
   }, [user, loading, router]);
 
-  // Initialize socket connection
+  // Initialize socket connection and set up listeners
   useEffect(() => {
     if (user && !socket) {
       const initSocket = async () => {
         const socketInstance = await getSocket();
         setSocket(socketInstance);
         
+        console.log('Setting up socket listeners for user:', user.uid);
+        
+        // Check if socket is already connected
+        if (socketInstance.connected) {
+          console.log('Socket already connected, joining user room');
+          socketInstance.emit('join', user.uid);
+          setIsConnected(true);
+        }
+        
+        socketInstance.on('connect', () => {
+          console.log('Connected to server');
+          setIsConnected(true);
+          socketInstance.emit('join', user.uid);
+        });
+
+        socketInstance.on('disconnect', () => {
+          console.log('Disconnected from server');
+          setIsConnected(false);
+        });
+
+        // Listen for new messages
+        socketInstance.on('new-message', (message: Message) => {
+          console.log('=== NEW MESSAGE RECEIVED ===');
+          console.log('Message:', message);
+          console.log('Current selected conversation (ref):', selectedConversationRef.current?.id);
+          console.log('Message conversation ID:', message.conversationId);
+          console.log('Current conversations count:', conversations.length);
+          
+          // Update conversation list with new message and increment unread count
+          setConversations(prev => {
+            console.log('Updating conversations, current count:', prev.length);
+            const updated = prev.map(conv => {
+              if (conv.id === message.conversationId) {
+                const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
+                const isOwnMessage = message.sender?.firebaseUid === user.uid;
+                
+                console.log('Found matching conversation:', conv.id);
+                console.log('Is current conversation:', isCurrentConversation);
+                console.log('Is own message:', isOwnMessage);
+                console.log('Previous unread count:', conv.unreadCount);
+                
+                const updatedConv = {
+                  ...conv,
+                  lastMessage: message,
+                  lastMessageAt: message.createdAt,
+                  // Increment unread count only if it's not the current conversation and not our own message
+                  unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
+                };
+                
+                console.log('New unread count:', updatedConv.unreadCount);
+                return updatedConv;
+              }
+              return conv;
+            });
+            console.log('Updated conversations count:', updated.length);
+            return updated;
+          });
+          
+          // Only add message to current messages if it belongs to the currently selected conversation
+          setMessages(prev => {
+            // Check if we're currently viewing this conversation using ref
+            if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
+              console.log('Adding message to current conversation');
+              return [...prev, message];
+            } else {
+              console.log('Message not for current conversation, ignoring');
+              return prev;
+            }
+          });
+        });
+
+        // Listen for conversation updates
+        socketInstance.on('conversation-updated', (data: any) => {
+          setConversations(prev => 
+            prev.map(conv => 
+              conv.id === data.conversationId 
+                ? { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt }
+                : conv
+            )
+          );
+        });
+
+        // Listen for new conversations
+        socketInstance.on('conversation-created', (conversation: Conversation) => {
+          setConversations(prev => {
+            // Check if conversation already exists to prevent duplicates
+            const exists = prev.some(conv => conv.id === conversation.id);
+            if (exists) {
+              return prev;
+            }
+            return [conversation, ...prev];
+          });
+          
+          // Join the new conversation room for real-time updates
+          socketInstance.emit('join-conversation', conversation.id);
+        });
+
+        // Listen for message deletions
+        socketInstance.on('message-deleted', (data: { 
+          messageId: string; 
+          permanentlyDeleted: boolean;
+          deletedByUser1?: boolean;
+          deletedByUser2?: boolean;
+        }) => {
+          if (data.permanentlyDeleted) {
+            // Remove message from the list
+            setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
+          } else {
+            // Soft delete - just filter out the message
+            setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
+          }
+        });
+
+        // Listen for conversation list updates (when messages are deleted)
+        socketInstance.on('conversation-list-updated', (data: { 
+          conversationId: string; 
+          messageDeleted: boolean;
+        }) => {
+          if (data.messageDeleted) {
+            // Reload conversations to update the last message preview
+            // Note: This will be handled by the socket initialization
+            console.log('Conversation list updated, but reloading is handled by socket init');
+          }
+        });
+
+        // Listen for typing indicators
+        socketInstance.on('typing', (data: { 
+          userId: string; 
+          username: string; 
+          displayName: string; 
+          isTyping: boolean; 
+          conversationId: string 
+        }) => {
+          console.log('Typing indicator received:', data);
+          
+          // Update typing users state
+          setTypingUsers(prev => {
+            const newTypingUsers = { ...prev };
+            
+            if (data.isTyping) {
+              newTypingUsers[data.conversationId] = {
+                username: data.username,
+                displayName: data.displayName
+              };
+            } else {
+              delete newTypingUsers[data.conversationId];
+            }
+            
+            return newTypingUsers;
+          });
+
+          // Don't update conversation preview when typing - just show typing indicator
+          // The conversation preview should remain unchanged to preserve unread count
+        });
+
+        // Listen for user status updates
+        socketInstance.on('user-status-updated', (data: { userId: string; status: string; lastSeen: string }) => {
+          setConversations(prev => 
+            prev.map(conv => ({
+              ...conv,
+              otherUser: conv.otherUser.id === data.userId 
+                ? { ...conv.otherUser, status: data.status as any, lastSeen: data.lastSeen }
+                : conv.otherUser
+            }))
+          );
+        });
+
+
+        // Load conversations after socket is set up
+        console.log('Loading conversations for user:', user.uid);
+        
+        // Load conversations and join rooms
+        const loadConversationsAndJoinRooms = async () => {
+          try {
+            console.log('=== LOADING CONVERSATIONS ===');
+            const token = await user?.getIdToken();
+            const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/conversations`, {
+              headers: {
+                'Authorization': `Bearer ${token}`,
+              },
+            });
+            
+            if (!response.ok) {
+              if (response.status === 404) {
+                // User profile not found, redirect to username setup
+                router.push('/username');
+                return;
+              }
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            console.log('Loaded conversations:', data.length);
+            
+            // Ensure data is an array before setting it
+            if (Array.isArray(data)) {
+              setConversations(data);
+              
+              // Join all conversation rooms for real-time message updates
+              console.log('Joining all conversation rooms for real-time updates...');
+              data.forEach((conv: Conversation) => {
+                socketInstance.emit('join-conversation', conv.id);
+              });
+            } else {
+              console.error('Invalid conversations data:', data);
+              setConversations([]);
+            }
+          } catch (error) {
+            console.error('Failed to load conversations:', error);
+            setConversations([]); // Ensure conversations is always an array
+          }
+        };
+        
+        loadConversationsAndJoinRooms();
       };
 
       initSocket();
@@ -187,196 +401,6 @@ export default function ChatPage() {
     }
   }, [user]);
 
-  // Set up socket listeners
-  useEffect(() => {
-    if (socket && user) {
-      console.log('Setting up socket listeners for user:', user.uid);
-      
-      // Check if socket is already connected
-      if (socket.connected) {
-        console.log('Socket already connected, joining user room');
-        socket.emit('join', user.uid);
-        setIsConnected(true);
-      }
-      
-      socket.on('connect', () => {
-        console.log('Connected to server');
-        setIsConnected(true);
-        socket.emit('join', user.uid);
-      });
-
-      socket.on('disconnect', () => {
-        console.log('Disconnected from server');
-        setIsConnected(false);
-      });
-
-      // Listen for new messages
-      socket.on('new-message', (message: Message) => {
-        console.log('=== NEW MESSAGE RECEIVED ===');
-        console.log('Message:', message);
-        console.log('Current selected conversation (ref):', selectedConversationRef.current?.id);
-        console.log('Message conversation ID:', message.conversationId);
-        console.log('Current conversations count:', conversations.length);
-        
-        // Update conversation list with new message and increment unread count
-        setConversations(prev => {
-          console.log('Updating conversations, current count:', prev.length);
-          const updated = prev.map(conv => {
-            if (conv.id === message.conversationId) {
-              const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
-              const isOwnMessage = message.sender?.firebaseUid === user.uid;
-              
-              console.log('Found matching conversation:', conv.id);
-              console.log('Is current conversation:', isCurrentConversation);
-              console.log('Is own message:', isOwnMessage);
-              console.log('Previous unread count:', conv.unreadCount);
-              
-              const updatedConv = {
-                ...conv,
-                lastMessage: message,
-                lastMessageAt: message.createdAt,
-                // Increment unread count only if it's not the current conversation and not our own message
-                unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
-              };
-              
-              console.log('New unread count:', updatedConv.unreadCount);
-              return updatedConv;
-            }
-            return conv;
-          });
-          console.log('Updated conversations count:', updated.length);
-          return updated;
-        });
-        
-        // Only add message to current messages if it belongs to the currently selected conversation
-        setMessages(prev => {
-          // Check if we're currently viewing this conversation using ref
-          if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
-            console.log('Adding message to current conversation');
-            return [...prev, message];
-          } else {
-            console.log('Message not for current conversation, ignoring');
-            return prev;
-          }
-        });
-      });
-
-      // Listen for conversation updates
-      socket.on('conversation-updated', (data: any) => {
-        setConversations(prev => 
-          prev.map(conv => 
-            conv.id === data.conversationId 
-              ? { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt }
-              : conv
-          )
-        );
-      });
-
-      // Listen for new conversations
-      socket.on('conversation-created', (conversation: Conversation) => {
-        setConversations(prev => {
-          // Check if conversation already exists to prevent duplicates
-          const exists = prev.some(conv => conv.id === conversation.id);
-          if (exists) {
-            return prev;
-          }
-          return [conversation, ...prev];
-        });
-      });
-
-      // Listen for message deletions
-      socket.on('message-deleted', (data: { 
-        messageId: string; 
-        permanentlyDeleted: boolean;
-        deletedByUser1?: boolean;
-        deletedByUser2?: boolean;
-      }) => {
-        if (data.permanentlyDeleted) {
-          // Remove message from the list
-          setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
-        } else {
-          // Soft delete - just filter out the message
-          setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
-        }
-      });
-
-      // Listen for conversation list updates (when messages are deleted)
-      socket.on('conversation-list-updated', (data: { 
-        conversationId: string; 
-        messageDeleted: boolean;
-      }) => {
-        if (data.messageDeleted) {
-          // Reload conversations to update the last message preview
-          loadConversations();
-        }
-      });
-
-      // Listen for typing indicators
-      socket.on('typing', (data: { 
-        userId: string; 
-        username: string; 
-        displayName: string; 
-        isTyping: boolean; 
-        conversationId: string 
-      }) => {
-        console.log('Typing indicator received:', data);
-        
-        // Update typing users state
-        setTypingUsers(prev => {
-          const newTypingUsers = { ...prev };
-          
-          if (data.isTyping) {
-            newTypingUsers[data.conversationId] = {
-              username: data.username,
-              displayName: data.displayName
-            };
-          } else {
-            delete newTypingUsers[data.conversationId];
-          }
-          
-          return newTypingUsers;
-        });
-
-        // Don't update conversation preview when typing - just show typing indicator
-        // The conversation preview should remain unchanged to preserve unread count
-      });
-
-      // Listen for user status updates
-      socket.on('user-status-updated', (data: { userId: string; status: string; lastSeen: string }) => {
-        setConversations(prev => 
-          prev.map(conv => ({
-            ...conv,
-            otherUser: conv.otherUser.id === data.userId 
-              ? { ...conv.otherUser, status: data.status as any, lastSeen: data.lastSeen }
-              : conv.otherUser
-          }))
-        );
-      });
-    }
-
-    return () => {
-      if (socket) {
-        socket.off('connect');
-        socket.off('disconnect');
-        socket.off('new-message');
-        socket.off('user-status-updated');
-        socket.off('conversation-updated');
-        socket.off('conversation-created');
-        socket.off('message-deleted');
-        socket.off('conversation-list-updated');
-        socket.off('typing');
-        socket.off('typing-stopped');
-      }
-    };
-  }, [socket, user]);
-
-  // Load conversations
-  useEffect(() => {
-    if (user && socket) {
-      console.log('Loading conversations for user:', user.uid);
-      loadConversations();
-    }
-  }, [user, socket]);
 
   // Load messages when conversation changes
   useEffect(() => {
