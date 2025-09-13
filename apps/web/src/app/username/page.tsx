@@ -13,12 +13,44 @@ export default function UsernamePage() {
   const [error, setError] = useState('');
   const [isChecking, setIsChecking] = useState(false);
   const [hasStartedSetup, setHasStartedSetup] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const router = useRouter();
 
-  // Redirect if not authenticated
+  // Redirect if not authenticated or if user already has a profile
   useEffect(() => {
     if (!user && !loading) {
       router.push('/auth');
+      return;
+    }
+
+    // Check if user already has a profile (should not be on username page)
+    if (user && !loading) {
+      const checkExistingProfile = async () => {
+        try {
+          setIsRedirecting(true);
+          const token = await user.getIdToken();
+          const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          
+          if (response.ok) {
+            // User already has a profile, redirect to chat
+            console.log('Username page: User already has profile, redirecting to chat');
+            router.push('/chat');
+          } else {
+            // No profile found, allow user to stay on username page
+            setIsRedirecting(false);
+          }
+        } catch (error) {
+          console.error('Profile check error:', error);
+          // On error, allow user to stay on username page
+          setIsRedirecting(false);
+        }
+      };
+      
+      checkExistingProfile();
     }
   }, [user, loading, router]);
 
@@ -112,13 +144,15 @@ export default function UsernamePage() {
     }
   };
 
-  // Show loading while checking auth
-  if (loading) {
+  // Show loading while checking auth or redirecting
+  if (loading || isRedirecting) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
+          <p className="mt-4 text-gray-600">
+            {loading ? 'Loading...' : 'Redirecting...'}
+          </p>
         </div>
       </div>
     );

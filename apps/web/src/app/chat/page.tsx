@@ -1,69 +1,25 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../lib/firebase';
 import { getSocket, disconnectSocket } from '../../lib/socket';
 // @ts-ignore
 import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
-import MediaPreview from '../MediaPreview';
+import dynamic from 'next/dynamic';
+import { User, Conversation, Message, Media, MessageReceipt } from './types';
+import ChatPreloader from './components/ChatPreloader';
 
-interface User {
-  id: string;
-  firebaseUid: string;
-  username: string;
-  displayName: string;
-  avatar?: string;
-  status: 'ONLINE' | 'OFFLINE' | 'AWAY' | 'BUSY';
-  lastSeen: string;
-}
+// Dynamic imports for better code splitting
+const ChatSidebar = dynamic(() => import('./components/ChatSidebar'), {
+  loading: () => <div className="w-80 bg-white shadow-lg flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>
+});
 
-interface Conversation {
-  id: string;
-  otherUser: User;
-  lastMessage?: Message;
-  lastMessageAt?: string;
-  unreadCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
+const MediaPreview = dynamic(() => import('../MediaPreview'), {
+  loading: () => <div>Loading media preview...</div>
+});
 
-interface Message {
-  id: string;
-  conversationId: string;
-  senderId: string;
-  recipientId?: string;
-  content?: string;
-  messageType: 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'FILE' | 'LOCATION' | 'CONTACT' | 'STICKER';
-  replyToId?: string;
-  editedAt?: string;
-  createdAt: string;
-  updatedAt: string;
-  sender: User;
-  recipient?: User;
-  media: Media[];
-  receipts: MessageReceipt[];
-  replyTo?: Message;
-}
-
-interface Media {
-  id: string;
-  fileName: string;
-  fileType: string;
-  fileSize: number;
-  s3Key: string;
-  s3Url: string;
-  thumbnailUrl?: string;
-  width?: number;
-  height?: number;
-  duration?: number;
-}
-
-interface MessageReceipt {
-  status: 'SENT' | 'DELIVERED' | 'READ';
-  timestamp: string;
-}
 
 export default function ChatPage() {
   const [user, loading, error] = useAuthState(auth);
@@ -163,6 +119,9 @@ export default function ChatPage() {
     if (user && !socket) {
       const initSocket = async () => {
         const socketInstance = await getSocket();
+        console.log('Socket instance created:', socketInstance);
+        console.log('Socket connected:', socketInstance.connected);
+        
         setSocket(socketInstance);
         
         console.log('Setting up socket listeners for user:', user.uid);
@@ -335,50 +294,7 @@ export default function ChatPage() {
 
         // Load conversations after socket is set up
         console.log('Loading conversations for user:', user.uid);
-        
-        // Load conversations and join rooms
-        const loadConversationsAndJoinRooms = async () => {
-          try {
-            console.log('=== LOADING CONVERSATIONS ===');
-            const token = await user?.getIdToken();
-            const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/conversations`, {
-              headers: {
-                'Authorization': `Bearer ${token}`,
-              },
-            });
-            
-            if (!response.ok) {
-              if (response.status === 404) {
-                // User profile not found, redirect to username setup
-                router.push('/username');
-                return;
-              }
-              throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            console.log('Loaded conversations:', data.length);
-            
-            // Ensure data is an array before setting it
-            if (Array.isArray(data)) {
-              setConversations(data);
-              
-              // Join all conversation rooms for real-time message updates
-              console.log('Joining all conversation rooms for real-time updates...');
-              data.forEach((conv: Conversation) => {
-                socketInstance.emit('join-conversation', conv.id);
-              });
-            } else {
-              console.error('Invalid conversations data:', data);
-              setConversations([]);
-            }
-          } catch (error) {
-            console.error('Failed to load conversations:', error);
-            setConversations([]); // Ensure conversations is always an array
-          }
-        };
-        
-        loadConversationsAndJoinRooms();
+        loadConversations();
       };
 
       initSocket();
@@ -401,6 +317,24 @@ export default function ChatPage() {
     }
   }, [user]);
 
+  // Load conversations and join rooms when socket is available
+  useEffect(() => {
+    if (socket && user) {
+      console.log('Socket available, loading conversations and joining rooms');
+      loadConversations();
+    }
+  }, [socket, user]);
+
+  // Join conversation rooms when conversations are loaded
+  useEffect(() => {
+    if (socket && conversations.length > 0) {
+      console.log('Joining all conversation rooms for real-time updates...');
+      conversations.forEach((conv: Conversation) => {
+        console.log('Joining conversation room:', conv.id);
+        socket.emit('join-conversation', conv.id);
+      });
+    }
+  }, [socket, conversations]);
 
   // Load messages when conversation changes
   useEffect(() => {
@@ -812,146 +746,27 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="h-screen bg-gray-100 flex overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-80 bg-white shadow-lg flex flex-col h-full">
-        {/* Header */}
-        <div className="p-4 border-b">
-          <div className="flex items-center justify-between">
-            <h1 className="text-xl font-bold text-gray-800">Chats</h1>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`}></div>
-                <span className="text-sm text-gray-600">{isConnected ? 'Online' : 'Offline'}</span>
-              </div>
-              <button
-                onClick={handleSignOut}
-                className="text-sm text-gray-600 hover:text-gray-800 underline"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-          <div className="mt-4">
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                placeholder="Search users..."
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  searchUsers(e.target.value);
-                  setShowSearch(!!(e.target.value && e.target.value.length > 0));
-                }}
-                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={() => setShowSearch(!showSearch)}
-                className="bg-blue-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-blue-700"
-              >
-                +
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Search Results */}
-        {showSearch && (
-          <div className="border-b max-h-60 overflow-y-auto">
-            {Array.isArray(searchResults) && searchResults.map((user) => (
-              <div
-                key={user.id}
-                onClick={() => createDirectConversation(user.id)}
-                className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100"
-              >
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 bg-gray-300 rounded-full flex items-center justify-center">
-                    {user.avatar ? (
-                      <img src={user.avatar} alt={user.displayName} className="w-10 h-10 rounded-full" />
-                    ) : (
-                      <span className="text-gray-600 font-semibold">
-                        {user.displayName.charAt(0).toUpperCase()}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex-1">
-                    <p className="font-semibold text-gray-800">{user.username}</p>
-                    <p className="text-sm text-gray-600">{user.displayName}</p>
-                  </div>
-                  <div className={`w-3 h-3 rounded-full ${
-                    user.status === 'ONLINE' ? 'bg-green-400' : 'bg-gray-400'
-                  }`}></div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Conversations List */}
-        <div className="flex-1 overflow-y-auto">
-          {Array.isArray(conversations) && conversations.map((conversation) => (
-            <div
-              key={conversation.id}
-              onClick={() => setSelectedConversation(conversation)}
-              className={`p-4 border-b hover:bg-gray-50 cursor-pointer relative ${
-                selectedConversation?.id === conversation.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''
-              } ${conversation.unreadCount > 0 ? 'bg-green-50' : ''}`}
-            >
-              <div className="flex items-center space-x-3">
-                <div className="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center relative">
-                  {conversation.otherUser.avatar ? (
-                    <img src={conversation.otherUser.avatar} alt={conversation.otherUser.displayName} className="w-12 h-12 rounded-full" />
-                  ) : (
-                    <span className="text-gray-600 font-semibold text-lg">
-                      {conversation.otherUser.displayName.charAt(0).toUpperCase()}
-                    </span>
-                  )}
-                  {/* Online status indicator */}
-                  <div className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-white ${
-                    conversation.otherUser.status === 'ONLINE' ? 'bg-green-400' : 'bg-gray-400'
-                  }`}></div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <p className={`font-semibold truncate ${
-                      conversation.unreadCount > 0 ? 'text-gray-900 font-bold' : 'text-gray-800'
-                    }`}>
-                      {conversation.otherUser.username}
-                    </p>
-                    <div className="flex items-center space-x-2">
-                      {conversation.unreadCount > 0 && (
-                        <span className="bg-green-500 text-white text-xs font-bold px-2 py-1 rounded-full min-w-[20px] text-center">
-                          {conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}
-                        </span>
-                      )}
-                      {conversation.lastMessageAt && (
-                        <span className={`text-xs ${
-                          conversation.unreadCount > 0 ? 'text-green-600 font-semibold' : 'text-gray-500'
-                        }`}>
-                          {formatTime(conversation.lastMessageAt)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <p className={`text-sm truncate ${
-                    conversation.unreadCount > 0 ? 'text-gray-800 font-medium' : 'text-gray-600'
-                  }`}>
-                    {typingUsers[conversation.id] ? (
-                      <span className="text-blue-600 italic">
-                        typing...
-                      </span>
-                    ) : conversation.lastMessage ? (
-                      conversation.lastMessage.messageType === 'TEXT' 
-                        ? conversation.lastMessage.content
-                        : `📎 ${conversation.lastMessage.messageType.toLowerCase()}`
-                    ) : 'No messages yet'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+    <>
+      <ChatPreloader />
+      <div className="h-screen bg-gray-100 flex overflow-hidden">
+        {/* Sidebar */}
+        <Suspense fallback={<div className="w-80 bg-white shadow-lg flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>}>
+          <ChatSidebar
+            conversations={conversations}
+            selectedConversation={selectedConversation}
+            onSelectConversation={setSelectedConversation}
+            onSearchUsers={searchUsers}
+            searchResults={searchResults}
+            showSearch={showSearch}
+            setShowSearch={setShowSearch}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            onCreateConversation={createDirectConversation}
+            isConnected={isConnected}
+            onSignOut={handleSignOut}
+            typingUsers={typingUsers}
+          />
+        </Suspense>
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -1124,5 +939,6 @@ export default function ChatPage() {
         )}
       </div>
     </div>
+    </>
   );
 }

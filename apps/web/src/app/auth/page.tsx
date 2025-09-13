@@ -27,35 +27,33 @@ export default function AuthPage() {
   // Redirect to chat if already authenticated (only for manual navigation to /auth)
   useEffect(() => {
     if (user && !loading && !formLoading) {
-      // Add a small delay to prevent conflicts with sign-in handlers
-      const timer = setTimeout(() => {
-        const checkProfileAndRedirect = async () => {
-          try {
-            const token = await user.getIdToken();
-            const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
-              headers: {
-                'Authorization': `Bearer ${token}`,
-              },
-            });
-            
-            if (response.ok) {
-              // Profile exists, go to chat
-              router.push('/chat');
-            } else {
-              // No profile, go to username setup
-              router.push('/username');
-            }
-          } catch (error) {
-            console.error('Profile check error:', error);
-            // On error, go to username setup
+      const checkProfileAndRedirect = async () => {
+        try {
+          const token = await user.getIdToken();
+          const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          
+          if (response.ok) {
+            // Profile exists, go to chat
+            console.log('Auth page: User has profile, redirecting to chat');
+            router.push('/chat');
+          } else {
+            // No profile, go to username setup
+            console.log('Auth page: No profile found, redirecting to username');
             router.push('/username');
           }
-        };
-        
-        checkProfileAndRedirect();
-      }, 1000); // 1 second delay to let sign-in handlers complete first
+        } catch (error) {
+          console.error('Profile check error:', error);
+          // On error, go to username setup
+          router.push('/username');
+        }
+      };
       
-      return () => clearTimeout(timer);
+      // Immediate redirect without delay
+      checkProfileAndRedirect();
     }
   }, [user, loading, formLoading, router]);
 
@@ -229,13 +227,15 @@ export default function AuthPage() {
     }
   };
 
-  // Show loading while checking auth state
-  if (loading) {
+  // Show loading while checking auth state or redirecting
+  if (loading || (user && !formLoading)) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
+          <p className="mt-4 text-gray-600">
+            {loading ? 'Loading...' : 'Redirecting...'}
+          </p>
         </div>
       </div>
     );

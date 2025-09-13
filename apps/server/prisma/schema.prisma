@@ -53,6 +53,8 @@ model Conversation {
   readStates ConversationReadState[]
 
   @@unique([user1Id, user2Id]) // Ensure unique pairs
+  @@index([user1Id, user2Id]) // Optimize conversation lookup
+  @@index([lastMessageAt(sort: Desc)]) // Optimize conversation ordering
   @@map("conversations")
 }
 
@@ -79,6 +81,9 @@ model Message {
   replies      Message[]    @relation("MessageReply")
   replyTo      Message?     @relation("MessageReply", fields: [replyToId], references: [id])
 
+  @@index([conversationId, createdAt(sort: Desc)]) // Optimize message ordering
+  @@index([conversationId, senderId, createdAt(sort: Desc)]) // Optimize unread count queries
+  @@index([deletedByUser1, deletedByUser2]) // Optimize soft delete filtering
   @@map("messages")
 }
 
@@ -104,6 +109,7 @@ model Media {
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([conversationId]) // Optimize media queries by conversation
   @@map("media")
 }
 
@@ -120,6 +126,7 @@ model MessageReceipt {
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, userId])
+  @@index([messageId, userId]) // Optimize receipt lookups
   @@map("message_receipts")
 }
 
@@ -137,6 +144,7 @@ model ConversationReadState {
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, userId])
+  @@index([conversationId, userId]) // Optimize read state lookups
   @@map("conversation_read_states")
 }
 
