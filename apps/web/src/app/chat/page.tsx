@@ -9,7 +9,6 @@ import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { User, Conversation, Message, Media, MessageReceipt } from './types';
-import ChatPreloader from './components/ChatPreloader';
 
 // Dynamic imports for better code splitting
 const ChatSidebar = dynamic(() => import('./components/ChatSidebar'), {
@@ -34,6 +33,7 @@ export default function ChatPage() {
   const [typingUsers, setTypingUsers] = useState<{[conversationId: string]: {username: string, displayName: string}}>({});
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [viewingImage, setViewingImage] = useState<{url: string, fileName: string} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [showSearch, setShowSearch] = useState(false);
@@ -67,19 +67,56 @@ export default function ChatPage() {
 
   // Scroll to bottom when new messages arrive
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ 
+        behavior: 'smooth',
+        block: 'end',
+        inline: 'nearest'
+      });
+    }
   };
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
+  // Scroll to bottom when conversation changes
+  useEffect(() => {
+    if (selectedConversation) {
+      // Multiple attempts to ensure scroll works with media loading
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+      
+      setTimeout(() => {
+        scrollToBottom();
+      }, 300);
+      
+      setTimeout(() => {
+        scrollToBottom();
+      }, 500);
+    }
+  }, [selectedConversation]);
+
+  // Handle ESC key to close image viewer
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && viewingImage) {
+        setViewingImage(null);
+      }
+    };
+
+    if (viewingImage) {
+      document.addEventListener('keydown', handleKeyDown);
+      return () => document.removeEventListener('keydown', handleKeyDown);
+    }
+  }, [viewingImage]);
+
   // Check if user has completed profile setup
   useEffect(() => {
     if (user && !loading) {
       const checkProfile = async () => {
         try {
-          console.log('Chat page: Checking profile for user:', user.uid);
           const token = await user.getIdToken();
           const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
             headers: {
@@ -87,17 +124,14 @@ export default function ChatPage() {
             },
           });
           
-          console.log('Chat page: Profile response status:', response.status);
           
           if (!response.ok) {
             // User profile not found, redirect to username setup
-            console.log('Chat page: No profile found, redirecting to username');
             router.push('/username');
             return;
           }
           
           // Profile exists, load conversations
-          console.log('Chat page: Profile found, loading conversations');
           // Note: Conversations will be loaded when socket initializes
         } catch (error) {
           console.error('Profile check error:', error);
@@ -119,51 +153,34 @@ export default function ChatPage() {
     if (user && !socket) {
       const initSocket = async () => {
         const socketInstance = await getSocket();
-        console.log('Socket instance created:', socketInstance);
-        console.log('Socket connected:', socketInstance.connected);
         
         setSocket(socketInstance);
         
-        console.log('Setting up socket listeners for user:', user.uid);
         
         // Check if socket is already connected
         if (socketInstance.connected) {
-          console.log('Socket already connected, joining user room');
           socketInstance.emit('join', user.uid);
           setIsConnected(true);
         }
         
         socketInstance.on('connect', () => {
-          console.log('Connected to server');
           setIsConnected(true);
           socketInstance.emit('join', user.uid);
         });
 
         socketInstance.on('disconnect', () => {
-          console.log('Disconnected from server');
           setIsConnected(false);
         });
 
         // Listen for new messages
         socketInstance.on('new-message', (message: Message) => {
-          console.log('=== NEW MESSAGE RECEIVED ===');
-          console.log('Message:', message);
-          console.log('Current selected conversation (ref):', selectedConversationRef.current?.id);
-          console.log('Message conversation ID:', message.conversationId);
-          console.log('Current conversations count:', conversations.length);
           
           // Update conversation list with new message and increment unread count
           setConversations(prev => {
-            console.log('Updating conversations, current count:', prev.length);
             const updated = prev.map(conv => {
               if (conv.id === message.conversationId) {
                 const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
                 const isOwnMessage = message.sender?.firebaseUid === user.uid;
-                
-                console.log('Found matching conversation:', conv.id);
-                console.log('Is current conversation:', isCurrentConversation);
-                console.log('Is own message:', isOwnMessage);
-                console.log('Previous unread count:', conv.unreadCount);
                 
                 const updatedConv = {
                   ...conv,
@@ -173,12 +190,10 @@ export default function ChatPage() {
                   unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
                 };
                 
-                console.log('New unread count:', updatedConv.unreadCount);
                 return updatedConv;
               }
               return conv;
             });
-            console.log('Updated conversations count:', updated.length);
             return updated;
           });
           
@@ -186,10 +201,13 @@ export default function ChatPage() {
           setMessages(prev => {
             // Check if we're currently viewing this conversation using ref
             if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
-              console.log('Adding message to current conversation');
+              // Check if message already exists to prevent duplicates
+              const messageExists = prev.some(m => m.id === message.id);
+              if (messageExists) {
+                return prev;
+              }
               return [...prev, message];
             } else {
-              console.log('Message not for current conversation, ignoring');
               return prev;
             }
           });
@@ -245,7 +263,6 @@ export default function ChatPage() {
           if (data.messageDeleted) {
             // Reload conversations to update the last message preview
             // Note: This will be handled by the socket initialization
-            console.log('Conversation list updated, but reloading is handled by socket init');
           }
         });
 
@@ -257,7 +274,6 @@ export default function ChatPage() {
           isTyping: boolean; 
           conversationId: string 
         }) => {
-          console.log('Typing indicator received:', data);
           
           // Update typing users state
           setTypingUsers(prev => {
@@ -293,7 +309,6 @@ export default function ChatPage() {
 
 
         // Load conversations after socket is set up
-        console.log('Loading conversations for user:', user.uid);
         loadConversations();
       };
 
@@ -320,7 +335,6 @@ export default function ChatPage() {
   // Load conversations and join rooms when socket is available
   useEffect(() => {
     if (socket && user) {
-      console.log('Socket available, loading conversations and joining rooms');
       loadConversations();
     }
   }, [socket, user]);
@@ -328,9 +342,7 @@ export default function ChatPage() {
   // Join conversation rooms when conversations are loaded
   useEffect(() => {
     if (socket && conversations.length > 0) {
-      console.log('Joining all conversation rooms for real-time updates...');
       conversations.forEach((conv: Conversation) => {
-        console.log('Joining conversation room:', conv.id);
         socket.emit('join-conversation', conv.id);
       });
     }
@@ -339,7 +351,6 @@ export default function ChatPage() {
   // Load messages when conversation changes
   useEffect(() => {
     if (selectedConversation && socket) {
-      console.log('Joining conversation:', selectedConversation.id);
       selectedConversationRef.current = selectedConversation; // Update ref
       loadMessages();
       socket.emit('join-conversation', selectedConversation.id);
@@ -394,7 +405,6 @@ export default function ChatPage() {
 
   const loadConversations = async () => {
     try {
-      console.log('=== LOADING CONVERSATIONS ===');
       const token = await user?.getIdToken();
       const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/conversations`, {
         headers: {
@@ -412,7 +422,6 @@ export default function ChatPage() {
       }
       
       const data = await response.json();
-      console.log('Loaded conversations:', data.length);
       // Ensure data is an array before setting it
       if (Array.isArray(data)) {
         setConversations(data);
@@ -452,6 +461,11 @@ export default function ChatPage() {
       
       const data = await response.json();
       setMessages(data.messages || []);
+      
+      // Scroll to bottom after messages are loaded
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
     } catch (error) {
       console.error('Failed to load messages:', error);
       setMessages([]); // Ensure messages is always an array
@@ -485,7 +499,6 @@ export default function ChatPage() {
       }
       
       const data = await response.json();
-      console.log('Search results:', data);
       setSearchResults(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Failed to search users:', error);
@@ -518,7 +531,6 @@ export default function ChatPage() {
       }
       
       const conversation = await response.json();
-      console.log('Created conversation:', conversation);
       setConversations(prev => {
         // Check if conversation already exists to prevent duplicates
         const exists = prev.some(conv => conv.id === conversation.id);
@@ -539,12 +551,6 @@ export default function ChatPage() {
     if (!newMessage.trim() || !selectedConversation || !socket) return;
 
     try {
-      console.log('Sending message via socket:', {
-        conversationId: selectedConversation.id,
-        content: newMessage,
-        messageType: 'TEXT',
-      });
-      
       // Send message via socket for real-time updates
       socket.emit('send-message', {
         conversationId: selectedConversation.id,
@@ -629,11 +635,12 @@ export default function ChatPage() {
   const uploadMedia = async (file: File) => {
     if (!selectedConversation) return;
 
+    
     try {
       const token = await user?.getIdToken();
       
       // Get upload URL
-      const uploadResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/upload-url`, {
+      const uploadResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/upload-url/${selectedConversation.id}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -642,21 +649,32 @@ export default function ChatPage() {
         body: JSON.stringify({
           fileName: file.name,
           fileType: file.type,
-          conversationId: selectedConversation.id,
         }),
       });
+      
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        console.error('Upload URL error response:', errorText);
+        throw new Error(`Upload URL failed: ${uploadResponse.status} - ${errorText}`);
+      }
       
       const { uploadUrl, mediaId } = await uploadResponse.json();
       
       // Upload file to S3
-      await fetch(uploadUrl, {
+      const s3Response = await fetch(uploadUrl, {
         method: 'PUT',
         headers: { 'Content-Type': file.type },
         body: file,
       });
       
+      if (!s3Response.ok) {
+        console.error('S3 upload failed:', s3Response.status, s3Response.statusText);
+        throw new Error(`S3 upload failed: ${s3Response.status}`);
+      }
+      
+      
       // Confirm upload
-      await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
+      const confirmResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -668,7 +686,14 @@ export default function ChatPage() {
         }),
       });
       
+      if (!confirmResponse.ok) {
+        const errorText = await confirmResponse.text();
+        console.error('Confirm upload error response:', errorText);
+        throw new Error(`Confirm upload failed: ${confirmResponse.status} - ${errorText}`);
+      }
+      
       // Send message with media
+      
       const messageResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages`, {
         method: 'POST',
         headers: {
@@ -682,17 +707,167 @@ export default function ChatPage() {
         }),
       });
       
+      if (!messageResponse.ok) {
+        const errorText = await messageResponse.text();
+        console.error('Message creation error response:', errorText);
+        throw new Error(`Message creation failed: ${messageResponse.status} - ${errorText}`);
+      }
+      
       if (messageResponse.ok) {
         setSelectedFile(null);
         setPreviewUrl(null);
       }
     } catch (error) {
-      console.error('Failed to upload media:', error);
+      console.error('=== MEDIA UPLOAD FAILED ===', error);
     }
   };
 
   const formatTime = (timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Function to get presigned URL for media viewing
+  const getMediaViewUrl = async (mediaId: string): Promise<string | null> => {
+    try {
+      const token = await user?.getIdToken();
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/view-url/${mediaId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        return data.viewUrl;
+      } else {
+        console.error('Failed to get media view URL:', response.status);
+        return null;
+      }
+    } catch (error) {
+      console.error('Error getting media view URL:', error);
+      return null;
+    }
+  };
+
+  // Component for rendering media with presigned URLs
+  const MediaImage = ({ media }: { media: any }) => {
+    const [imageUrl, setImageUrl] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(false);
+
+    useEffect(() => {
+      const fetchImageUrl = async () => {
+        try {
+          setLoading(true);
+          const url = await getMediaViewUrl(media.id);
+          if (url) {
+            setImageUrl(url);
+          } else {
+            setError(true);
+          }
+        } catch (err) {
+          console.error('Error fetching image URL:', err);
+          setError(true);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      fetchImageUrl();
+    }, [media.id]);
+
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center p-4 bg-gray-100 rounded">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        </div>
+      );
+    }
+
+    if (error || !imageUrl) {
+      return (
+        <div className="flex items-center justify-center p-4 bg-gray-100 rounded text-gray-500">
+          Failed to load image
+        </div>
+      );
+    }
+
+    return (
+      <img 
+        src={imageUrl} 
+        alt={media.fileName || "Shared image"} 
+        className="w-full h-auto rounded border border-gray-400 scale-80 cursor-pointer hover:opacity-90 transition-opacity"
+        onClick={() => setViewingImage({url: imageUrl, fileName: media.fileName || "image"})}
+        onLoad={() => {
+          // Scroll to bottom when image loads to ensure we see the latest content
+          setTimeout(() => scrollToBottom(), 50);
+        }}
+        onError={(e) => {
+          console.error('Image failed to load:', e);
+          setError(true);
+        }}
+      />
+    );
+  };
+
+  // Component for rendering video with presigned URLs
+  const MediaVideo = ({ media }: { media: any }) => {
+    const [videoUrl, setVideoUrl] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(false);
+
+    useEffect(() => {
+      const fetchVideoUrl = async () => {
+        try {
+          setLoading(true);
+          const url = await getMediaViewUrl(media.id);
+          if (url) {
+            setVideoUrl(url);
+          } else {
+            setError(true);
+          }
+        } catch (err) {
+          console.error('Error fetching video URL:', err);
+          setError(true);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      fetchVideoUrl();
+    }, [media.id]);
+
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center p-4 bg-gray-100 rounded">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        </div>
+      );
+    }
+
+    if (error || !videoUrl) {
+      return (
+        <div className="flex items-center justify-center p-4 bg-gray-100 rounded text-gray-500">
+          Failed to load video
+        </div>
+      );
+    }
+
+    return (
+      <video 
+        src={videoUrl} 
+        controls 
+        className="w-full h-auto rounded border border-gray-400 scale-80"
+        onLoadedData={() => {
+          // Scroll to bottom when video loads to ensure we see the latest content
+          setTimeout(() => scrollToBottom(), 50);
+        }}
+        onError={(e) => {
+          console.error('Video failed to load:', e);
+          setError(true);
+        }}
+      />
+    );
   };
 
   const formatDate = (timestamp: string) => {
@@ -746,9 +921,7 @@ export default function ChatPage() {
   }
 
   return (
-    <>
-      <ChatPreloader />
-      <div className="h-screen bg-gray-100 flex overflow-hidden">
+    <div className="h-screen bg-gray-100 flex overflow-hidden">
         {/* Sidebar */}
         <Suspense fallback={<div className="w-80 bg-white shadow-lg flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>}>
           <ChatSidebar
@@ -799,28 +972,33 @@ export default function ChatPage() {
             <div className="flex-1 overflow-y-auto p-4 space-y-4 h-0">
               {Array.isArray(messages) && messages.map((message) => {
                 const isOwnMessage = message.sender?.firebaseUid === user.uid;
-                console.log('Message alignment check:', { 
-                  messageSenderFirebaseUid: message.sender?.firebaseUid, 
-                  userUid: user.uid, 
-                  isOwnMessage 
-                });
                 return (
                 <div key={message.id} className={`flex ${isOwnMessage ? 'justify-end' : 'justify-start'} group`}>
-                  <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg relative ${
-                    isOwnMessage 
-                      ? 'bg-blue-500 text-white' 
-                      : 'bg-gray-200 text-gray-800'
+                  <div className={`max-w-xs lg:max-w-md rounded-lg relative ${
+                    message.messageType === 'IMAGE' || message.messageType === 'VIDEO'
+                      ? 'bg-white'
+                      : isOwnMessage 
+                        ? 'bg-blue-500 text-white px-4 py-2' 
+                        : 'bg-gray-200 text-gray-800 px-4 py-2'
                   }`}>
                     {message.messageType === 'TEXT' && (
                       <div>{message.content}</div>
                     )}
                     {message.messageType === 'IMAGE' && message.media[0] && (
-                      <img src={message.media[0].s3Url} alt="Shared image" className="max-w-full h-auto rounded" />
+                      <div className="pb-6">
+                        <MediaImage media={message.media[0]} />
+                      </div>
                     )}
                     {message.messageType === 'VIDEO' && message.media[0] && (
-                      <video src={message.media[0].s3Url} controls className="max-w-full h-auto rounded" />
+                      <div className="pb-6">
+                        <MediaVideo media={message.media[0]} />
+                      </div>
                     )}
-                    <div className="flex justify-between items-center mt-1">
+                    <div className={`flex justify-between items-center ${
+                      message.messageType === 'IMAGE' || message.messageType === 'VIDEO'
+                        ? 'bg-gray-200 text-gray-800 px-2 py-1 -mx-1 -mb-1 rounded-b-lg absolute bottom-0 left-0 right-0'
+                        : 'mt-1'
+                    }`}>
                       <div className="text-xs opacity-75">
                         {formatTime(message.createdAt)}
                       </div>
@@ -839,11 +1017,66 @@ export default function ChatPage() {
                       >
                         🗑️
                       </button>
-                    </div>
-                  </div>
-                </div>
-                );
-              })}
+        </div>
+      </div>
+
+      {/* Image Viewer Modal */}
+      {viewingImage && (
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4"
+          onClick={() => setViewingImage(null)}
+        >
+          <div 
+            className="relative max-w-4xl max-h-full w-full h-full flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header with close button and download */}
+            <div className="flex justify-between items-center p-4 bg-black bg-opacity-50 text-white">
+              <h3 className="text-lg font-medium truncate">{viewingImage.fileName}</h3>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => {
+                    const link = document.createElement('a');
+                    link.href = viewingImage.url;
+                    link.download = viewingImage.fileName;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                  className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                  title="Download image"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setViewingImage(null)}
+                  className="p-2 bg-gray-600 hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Close"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            
+            {/* Image container */}
+            <div className="flex-1 flex items-center justify-center p-4">
+              <img
+                src={viewingImage.url}
+                alt={viewingImage.fileName}
+                className="max-w-full max-h-full object-contain rounded-lg"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+})}
               {selectedConversation && typingUsers[selectedConversation.id] && (
                 <div className="text-sm text-blue-600 italic animate-pulse">
                   typing...
@@ -939,6 +1172,5 @@ export default function ChatPage() {
         )}
       </div>
     </div>
-    </>
   );
 }

@@ -73,7 +73,6 @@ export function setupSocketHandlers(io: SocketIOServer) {
             });
           }
 
-          console.log(`✅ User logged in: @${user.username} (${user.displayName})`);
         }
       } catch (error) {
         console.error('Join error:', error);
@@ -83,9 +82,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
     // Join conversation room
     socket.on('join-conversation', async (conversationId: string) => {
       try {
-        console.log('User joining conversation:', conversationId, 'userId:', socket.data.userId);
         if (!socket.data.userId) {
-          console.log('No userId found, cannot join conversation');
           return;
         }
 
@@ -102,9 +99,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
 
         if (conversation) {
           socket.join(`conversation:${conversationId}`);
-          console.log('User successfully joined conversation:', conversationId);
         } else {
-          console.log('User not authorized to join conversation:', conversationId);
         }
       } catch (error) {
         console.error('Join conversation error:', error);
@@ -275,7 +270,6 @@ export function setupSocketHandlers(io: SocketIOServer) {
         ]);
 
         // Emit message to all participants in the conversation
-        console.log('Emitting new-message to conversation:', conversationId);
         io.to(`conversation:${conversationId}`).emit('new-message', message);
 
         // Emit conversation update to all participants
@@ -511,7 +505,6 @@ export function setupSocketHandlers(io: SocketIOServer) {
             select: { displayName: true, username: true },
           });
           
-          console.log(`❌ User logged out: @${user?.username || 'unknown'} (${user?.displayName || 'Unknown User'})`);
         }
       } catch (error) {
         console.error('Disconnect error:', error);

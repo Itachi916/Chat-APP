@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../lib/prisma';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
+import { getSocketServer } from '../socket';
 
 const router = Router();
 
@@ -62,7 +63,7 @@ router.get('/conversation/:conversationId', authenticateToken, async (req: Authe
             id: true,
             fileName: true,
             fileType: true,
-            s3Url: true,
+            s3Key: true,
           },
         },
         replyTo: {
@@ -130,8 +131,13 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
     const { conversationId, content, messageType = 'TEXT', mediaIds, replyToId } = req.body;
 
-    if (!conversationId || !content) {
-      return res.status(400).json({ error: 'Conversation ID and content are required' });
+    if (!conversationId) {
+      return res.status(400).json({ error: 'Conversation ID is required' });
+    }
+    
+    // For media messages, content is optional if mediaIds are provided
+    if (!content && (!mediaIds || mediaIds.length === 0)) {
+      return res.status(400).json({ error: 'Either content or mediaIds are required' });
     }
 
     const currentUser = await prisma.user.findUnique({
@@ -168,7 +174,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
       data: {
         conversationId,
         senderId: currentUser.id,
-        content,
+        content: content || '', // Allow empty content for media messages
         messageType: messageType as any,
         replyToId,
       },
@@ -187,7 +193,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
             id: true,
             fileName: true,
             fileType: true,
-            s3Url: true,
+            s3Key: true,
           },
         },
         replyTo: {
@@ -203,6 +209,66 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
         },
       },
     });
+
+    // Link media to the message if mediaIds are provided
+    if (mediaIds && mediaIds.length > 0) {
+      console.log('Linking media to message:', {
+        messageId: message.id,
+        mediaIds: mediaIds,
+        userId: currentUser.id
+      });
+      
+      const updateResult = await prisma.media.updateMany({
+        where: {
+          id: { in: mediaIds },
+          userId: currentUser.id, // Ensure user owns the media
+        },
+        data: {
+          messageId: message.id,
+        },
+      });
+      
+      console.log('Media update result:', updateResult);
+      
+      // Fetch the message again with media included
+      const messageWithMedia = await prisma.message.findUnique({
+        where: { id: message.id },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              firebaseUid: true,
+              username: true,
+              displayName: true,
+              avatar: true,
+            },
+          },
+          media: {
+            select: {
+              id: true,
+              fileName: true,
+              fileType: true,
+              s3Key: true, // Include s3Key instead of s3Url
+            },
+          },
+          replyTo: {
+            include: {
+              sender: {
+                select: {
+                  id: true,
+                  username: true,
+                  displayName: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      
+      if (messageWithMedia) {
+        message.media = messageWithMedia.media;
+      }
+    }
 
     // Update conversation's last message time
     await prisma.conversation.update({
@@ -228,15 +294,21 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
       }),
     ]);
 
-    // If media IDs provided, associate them with the message
-    if (mediaIds && mediaIds.length > 0) {
-      await prisma.media.updateMany({
-        where: {
-          id: { in: mediaIds },
-          userId: currentUser.id,
-        },
-        data: { messageId: message.id },
+    // Emit message via socket for real-time updates
+    try {
+      const io = getSocketServer();
+      console.log('Message being emitted:', JSON.stringify(message, null, 2));
+      io.to(`conversation:${conversationId}`).emit('new-message', message);
+      
+      // Emit conversation update
+      io.to(`conversation:${conversationId}`).emit('conversation-updated', {
+        conversationId,
+        lastMessage: message,
+        lastMessageAt: new Date(),
       });
+    } catch (socketError) {
+      console.error('Socket emission error:', socketError);
+      // Don't fail the request if socket emission fails
     }
 
     res.status(201).json(message);

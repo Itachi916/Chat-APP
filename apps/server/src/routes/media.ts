@@ -61,6 +61,14 @@ router.post('/upload-url/:conversationId', authenticateToken, validateConversati
     const { conversationId } = req.params;
     const { fileName, fileType, messageId } = req.body;
     
+    console.log('Upload URL request:', {
+      conversationId,
+      fileName,
+      fileType,
+      messageId,
+      user: req.user?.uid
+    });
+    
     if (!fileName || !fileType) {
       return res.status(400).json({ error: 'File name and type are required' });
     }
@@ -159,6 +167,54 @@ router.get('/download-url/:key', authenticateToken, async (req: AuthenticatedReq
   } catch (error) {
     console.error('Download URL error:', error);
     res.status(500).json({ error: 'Failed to generate download URL' });
+  }
+});
+
+// Get presigned URL for media viewing (1 day expiry)
+router.get('/view-url/:mediaId', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { mediaId } = req.params;
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Find the media and verify user has access to it
+    const media = await prisma.media.findFirst({
+      where: {
+        id: mediaId,
+        OR: [
+          { userId: currentUser.id }, // User owns the media
+          {
+            conversation: {
+              OR: [
+                { user1Id: currentUser.id },
+                { user2Id: currentUser.id },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    if (!media) {
+      return res.status(404).json({ error: 'Media not found or access denied' });
+    }
+
+    const viewUrl = await getPresignedDownloadUrl(media.s3Key, 60 * 60 * 24); // 1 day
+    
+    res.json({ 
+      viewUrl,
+      expiresIn: 60 * 60 * 24 // 1 day
+    });
+  } catch (error) {
+    console.error('View URL error:', error);
+    res.status(500).json({ error: 'Failed to generate view URL' });
   }
 });
 
