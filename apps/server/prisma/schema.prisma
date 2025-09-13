@@ -1,0 +1,167 @@
+// Chat App Database Schema
+// Handles users, direct conversations, messages, media, and message receipts
+// Focus: 1-on-1 chat only
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/@prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model - stores user information
+model User {
+  id        String   @id @default(cuid())
+  firebaseUid String @unique // Firebase UID for authentication
+  email     String   @unique
+  username  String   @unique
+  displayName String
+  avatar    String?  // URL to avatar image in S3
+  status    UserStatus @default(OFFLINE)
+  lastSeen  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  sentMessages     Message[]     @relation("MessageSender")
+  conversations1   Conversation[] @relation("ConversationUser1")
+  conversations2   Conversation[] @relation("ConversationUser2")
+  messageReceipts  MessageReceipt[]
+  media            Media[]
+  readStates       ConversationReadState[]
+
+  @@map("users")
+}
+
+// Conversation model - represents a direct chat between two users
+model Conversation {
+  id        String   @id @default(cuid())
+  user1Id   String   // First user in the conversation
+  user2Id   String   // Second user in the conversation
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastMessageAt DateTime? // For sorting conversations
+
+  // Relations
+  user1     User      @relation("ConversationUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2     User      @relation("ConversationUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+  messages  Message[]
+  media     Media[]
+  readStates ConversationReadState[]
+
+  @@unique([user1Id, user2Id]) // Ensure unique pairs
+  @@map("conversations")
+}
+
+
+// Message model - stores all messages in direct conversations
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderId       String
+  content        String?  // Text content (null for media-only messages)
+  messageType    MessageType @default(TEXT)
+  replyToId      String?  // For reply messages
+  editedAt       DateTime? // For edited messages
+  deletedByUser1 Boolean  @default(false) // Soft delete for user1
+  deletedByUser2 Boolean  @default(false) // Soft delete for user2
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  media        Media[]
+  receipts     MessageReceipt[]
+  replies      Message[]    @relation("MessageReply")
+  replyTo      Message?     @relation("MessageReply", fields: [replyToId], references: [id])
+
+  @@map("messages")
+}
+
+// Media model - stores information about files (photos, videos, etc.)
+model Media {
+  id             String   @id @default(cuid())
+  messageId      String?
+  conversationId String?
+  userId         String
+  fileName       String
+  fileType       String   // MIME type
+  fileSize       Int      // Size in bytes
+  s3Key          String   // S3 object key
+  s3Url          String   // Full S3 URL
+  thumbnailUrl   String?  // For videos/images
+  width          Int?     // For images/videos
+  height         Int?     // For images/videos
+  duration       Int?     // For audio/video in seconds
+  createdAt      DateTime @default(now())
+
+  // Relations
+  message      Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("media")
+}
+
+// Message receipts - tracks delivery and read status
+model MessageReceipt {
+  id        String        @id @default(cuid())
+  messageId String
+  userId    String
+  status    ReceiptStatus @default(SENT)
+  timestamp DateTime      @default(now())
+
+  // Relations
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@map("message_receipts")
+}
+
+// Conversation read state - tracks when each user last read each conversation
+model ConversationReadState {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  readAt         DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@map("conversation_read_states")
+}
+
+// Enums
+enum UserStatus {
+  ONLINE
+  OFFLINE
+  AWAY
+  BUSY
+}
+
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+  LOCATION
+  CONTACT
+  STICKER
+}
+
+enum ReceiptStatus {
+  SENT      // Message sent to server
+  DELIVERED // Message delivered to recipient's device
+  READ      // Message read by recipient
+}

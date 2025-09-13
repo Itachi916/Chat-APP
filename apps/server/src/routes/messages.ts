@@ -1,87 +1,444 @@
 import { Router } from 'express';
-import { AuthedRequest, requireAuth } from '../auth';
-import { z } from 'zod';
-import { containsPhoneNumber } from '../moderation';
-import { getSocketServer } from '../socket';
+import { prisma } from '../lib/prisma';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 
-// For demo purposes, use in-memory store
-type Message = {
-  id: string;
-  conversationId: string;
-  fromUserId: string;
-  toUserId: string;
-  type: 'text' | 'image' | 'video';
-  content: string; // text or s3 key
-  createdAt: number;
-  deliveredAt?: number;
-  readAt?: number;
-};
+// Get messages for a conversation
+router.get('/conversation/:conversationId', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { page = '1', limit = '50' } = req.query;
 
-const conversations: Record<string, Message[]> = {};
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
 
-const sendSchema = z.object({
-  conversationId: z.string(),
-  toUserId: z.string(),
-  type: z.enum(['text', 'image', 'video']),
-  content: z.string().min(1)
-});
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
-router.post('/send', requireAuth, (req: AuthedRequest, res) => {
-  const parsed = sendSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
-  const { conversationId, toUserId, type, content } = parsed.data;
-  const fromUserId = req.user!.uid;
+    // Check if user is part of the conversation
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        OR: [
+          { user1Id: currentUser.id },
+          { user2Id: currentUser.id },
+        ],
+      },
+    });
 
-  if (type === 'text' && containsPhoneNumber(content)) {
-    return res.status(400).json({ error: 'Sharing phone numbers is not allowed' });
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const pageNum = parseInt(page as string);
+    const limitNum = parseInt(limit as string);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Determine which user the current user is in the conversation
+    const isUser1 = conversation.user1Id === currentUser.id;
+    
+    const messages = await prisma.message.findMany({
+      where: { 
+        conversationId,
+        // Filter out messages deleted by the current user
+        ...(isUser1 ? { deletedByUser1: false } : { deletedByUser2: false })
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            firebaseUid: true,
+            username: true,
+            displayName: true,
+            avatar: true,
+          },
+        },
+        media: {
+          select: {
+            id: true,
+            fileName: true,
+            fileType: true,
+            s3Url: true,
+          },
+        },
+        replyTo: {
+          include: {
+            sender: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+              },
+            },
+          },
+        },
+        receipts: {
+          where: { userId: currentUser.id },
+          select: {
+            status: true,
+            timestamp: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limitNum,
+    });
+
+    // Get total count for pagination
+    const totalMessages = await prisma.message.count({
+      where: { conversationId },
+    });
+
+    // Format messages for response
+    const formattedMessages = messages.map((message) => ({
+      id: message.id,
+      conversationId: message.conversationId,
+      senderId: message.senderId,
+      content: message.content,
+      messageType: message.messageType,
+      replyToId: message.replyToId,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+      sender: message.sender,
+      media: message.media,
+      replyTo: message.replyTo,
+      receipt: message.receipts[0] || null,
+    }));
+
+    res.json({
+      messages: formattedMessages.reverse(), // Reverse to show oldest first
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalMessages,
+        pages: Math.ceil(totalMessages / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error('Get messages error:', error);
+    res.status(500).json({ error: 'Failed to get messages' });
   }
-
-  const msg: Message = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    conversationId,
-    fromUserId,
-    toUserId,
-    type,
-    content,
-    createdAt: Date.now(),
-    deliveredAt: Date.now()
-  };
-  conversations[conversationId] = conversations[conversationId] || [];
-  conversations[conversationId].push(msg);
-  try {
-    const io = getSocketServer();
-    // Notify only the recipient; the sender will append locally
-    io.to(toUserId).emit('message', msg);
-    // Notify sender that delivery has occurred
-    io.to(fromUserId).emit('delivered', { conversationId, messageId: msg.id, deliveredAt: msg.deliveredAt });
-  } catch {}
-  res.json({ message: msg });
 });
 
-router.get('/history', requireAuth, (req: AuthedRequest, res) => {
-  const conversationId = req.query.conversationId as string;
-  if (!conversationId) return res.status(400).json({ error: 'Missing conversationId' });
-  const msgs = (conversations[conversationId] || []).filter(
-    (m) => m.fromUserId === req.user!.uid || m.toUserId === req.user!.uid
-  );
-  res.json({ messages: msgs });
+// Send a message
+router.post('/', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { conversationId, content, messageType = 'TEXT', mediaIds, replyToId } = req.body;
+
+    if (!conversationId || !content) {
+      return res.status(400).json({ error: 'Conversation ID and content are required' });
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user is part of the conversation
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        OR: [
+          { user1Id: currentUser.id },
+          { user2Id: currentUser.id },
+        ],
+      },
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Get the other user in the conversation
+    const otherUserId = conversation.user1Id === currentUser.id 
+      ? conversation.user2Id 
+      : conversation.user1Id;
+
+    // Create the message
+    const message = await prisma.message.create({
+      data: {
+        conversationId,
+        senderId: currentUser.id,
+        content,
+        messageType: messageType as any,
+        replyToId,
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            firebaseUid: true,
+            username: true,
+            displayName: true,
+            avatar: true,
+          },
+        },
+        media: {
+          select: {
+            id: true,
+            fileName: true,
+            fileType: true,
+            s3Url: true,
+          },
+        },
+        replyTo: {
+          include: {
+            sender: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Update conversation's last message time
+    await prisma.conversation.update({
+      where: { id: conversationId },
+      data: { lastMessageAt: new Date() },
+    });
+
+    // Create message receipts for both users
+    await Promise.all([
+      prisma.messageReceipt.create({
+        data: {
+          messageId: message.id,
+          userId: currentUser.id,
+          status: 'SENT',
+        },
+      }),
+      prisma.messageReceipt.create({
+        data: {
+          messageId: message.id,
+          userId: otherUserId,
+          status: 'SENT',
+        },
+      }),
+    ]);
+
+    // If media IDs provided, associate them with the message
+    if (mediaIds && mediaIds.length > 0) {
+      await prisma.media.updateMany({
+        where: {
+          id: { in: mediaIds },
+          userId: currentUser.id,
+        },
+        data: { messageId: message.id },
+      });
+    }
+
+    res.status(201).json(message);
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
 });
 
-router.post('/read', requireAuth, (req: AuthedRequest, res) => {
-  const messageId = req.body.messageId as string;
-  const conversationId = req.body.conversationId as string;
-  const list = conversations[conversationId] || [];
-  const message = list.find((m) => m.id === messageId && m.toUserId === req.user!.uid);
-  if (!message) return res.status(404).json({ error: 'Message not found' });
-  message.readAt = Date.now();
+// Update message receipt status
+router.put('/:messageId/receipt', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
-    const io = getSocketServer();
-    io.to(message.fromUserId).emit('read', { conversationId, messageId, readAt: message.readAt });
-  } catch {}
-  res.json({ ok: true, readAt: message.readAt });
+    const { messageId } = req.params;
+    const { status } = req.body;
+
+    if (!['SENT', 'DELIVERED', 'READ'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid receipt status' });
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user has access to this message
+    const message = await prisma.message.findFirst({
+      where: {
+        id: messageId,
+        conversation: {
+          OR: [
+            { user1Id: currentUser.id },
+            { user2Id: currentUser.id },
+          ],
+        },
+      },
+    });
+
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    const receipt = await prisma.messageReceipt.upsert({
+      where: {
+        messageId_userId: {
+          messageId,
+          userId: currentUser.id,
+        },
+      },
+      update: {
+        status: status as any,
+        timestamp: new Date(),
+      },
+      create: {
+        messageId,
+        userId: currentUser.id,
+        status: status as any,
+      },
+    });
+
+    res.json(receipt);
+  } catch (error) {
+    console.error('Update receipt error:', error);
+    res.status(500).json({ error: 'Failed to update receipt' });
+  }
+});
+
+// Soft delete a message
+router.delete('/:messageId', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { messageId } = req.params;
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Get the message and conversation to check permissions
+    const message = await prisma.message.findFirst({
+      where: { id: messageId },
+      include: {
+        conversation: {
+          select: { user1Id: true, user2Id: true }
+        }
+      }
+    });
+
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    // Check if user is part of the conversation
+    const isUser1 = message.conversation.user1Id === currentUser.id;
+    const isUser2 = message.conversation.user2Id === currentUser.id;
+
+    if (!isUser1 && !isUser2) {
+      return res.status(403).json({ error: 'Not authorized to delete this message' });
+    }
+
+    // Update the appropriate delete flag
+    const updateData = isUser1 
+      ? { deletedByUser1: true }
+      : { deletedByUser2: true };
+
+    const updatedMessage = await prisma.message.update({
+      where: { id: messageId },
+      data: updateData,
+      include: {
+        conversation: {
+          select: { user1Id: true, user2Id: true }
+        }
+      }
+    });
+
+    // Check if both users have deleted the message
+    if (updatedMessage.deletedByUser1 && updatedMessage.deletedByUser2) {
+      // Permanently delete the message
+      await prisma.messageReceipt.deleteMany({
+        where: { messageId },
+      });
+      
+      await prisma.message.delete({
+        where: { id: messageId },
+      });
+
+      return res.json({ 
+        message: 'Message permanently deleted',
+        permanentlyDeleted: true 
+      });
+    }
+
+    res.json({ 
+      message: 'Message deleted for you',
+      permanentlyDeleted: false 
+    });
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
+// Get message receipts for a conversation
+router.get('/conversation/:conversationId/receipts', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user is part of the conversation
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        OR: [
+          { user1Id: currentUser.id },
+          { user2Id: currentUser.id },
+        ],
+      },
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const receipts = await prisma.messageReceipt.findMany({
+      where: {
+        message: {
+          conversationId,
+        },
+        userId: currentUser.id,
+      },
+      include: {
+        message: {
+          select: {
+            id: true,
+            senderId: true,
+            content: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: { timestamp: 'desc' },
+    });
+
+    res.json(receipts);
+  } catch (error) {
+    console.error('Get receipts error:', error);
+    res.status(500).json({ error: 'Failed to get receipts' });
+  }
 });
 
 export default router;
-
