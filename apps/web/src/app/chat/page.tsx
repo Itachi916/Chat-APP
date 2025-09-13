@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../lib/firebase';
-import { getSocket } from '../../lib/socket';
+import { getSocket, disconnectSocket } from '../../lib/socket';
+// @ts-ignore
 import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import MediaPreview from '../MediaPreview';
@@ -74,7 +75,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [typingUsers, setTypingUsers] = useState<{[conversationId: string]: {username: string, displayName: string}}>({});
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -95,6 +96,12 @@ export default function ChatPage() {
   // Handle sign out
   const handleSignOut = async () => {
     try {
+      // Disconnect socket before signing out
+      if (socket) {
+        socket.disconnect();
+        setSocket(null);
+      }
+      disconnectSocket(); // Clean up global socket instance
       await signOut(auth);
       router.push('/auth');
     } catch (error) {
@@ -153,148 +160,220 @@ export default function ChatPage() {
 
   // Initialize socket connection
   useEffect(() => {
-    if (user) {
+    if (user && !socket) {
       const initSocket = async () => {
         const socketInstance = await getSocket();
         setSocket(socketInstance);
         
-        socketInstance.on('connect', () => {
-          console.log('Connected to server');
-          setIsConnected(true);
-          socketInstance.emit('join', user.uid);
-        });
-
-        socketInstance.on('disconnect', () => {
-          console.log('Disconnected from server');
-          setIsConnected(false);
-        });
-
-        // Listen for new messages
-        socketInstance.on('new-message', (message: Message) => {
-          console.log('Received new message via socket:', message);
-          console.log('Current selected conversation (ref):', selectedConversationRef.current?.id);
-          console.log('Message conversation ID:', message.conversationId);
-          
-          // Update conversation list with new message and increment unread count
-          setConversations(prev => 
-            prev.map(conv => {
-              if (conv.id === message.conversationId) {
-                const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
-                const isOwnMessage = message.sender?.firebaseUid === user.uid;
-                
-                return {
-                  ...conv,
-                  lastMessage: message,
-                  lastMessageAt: message.createdAt,
-                  // Increment unread count only if it's not the current conversation and not our own message
-                  unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
-                };
-              }
-              return conv;
-            })
-          );
-          
-          // Only add message to current messages if it belongs to the currently selected conversation
-          setMessages(prev => {
-            // Check if we're currently viewing this conversation using ref
-            if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
-              console.log('Adding message to current conversation');
-              return [...prev, message];
-            } else {
-              console.log('Message not for current conversation, ignoring');
-              return prev;
-            }
-          });
-        });
-
-        // Listen for conversation updates
-        socketInstance.on('conversation-updated', (data: any) => {
-          setConversations(prev => 
-            prev.map(conv => 
-              conv.id === data.conversationId 
-                ? { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt }
-                : conv
-            )
-          );
-        });
-
-        // Listen for new conversations
-        socketInstance.on('conversation-created', (conversation: Conversation) => {
-          setConversations(prev => {
-            // Check if conversation already exists to prevent duplicates
-            const exists = prev.some(conv => conv.id === conversation.id);
-            if (exists) {
-              return prev;
-            }
-            return [conversation, ...prev];
-          });
-        });
-
-        // Listen for message deletions
-        socketInstance.on('message-deleted', (data: { 
-          messageId: string; 
-          permanentlyDeleted: boolean;
-          deletedByUser1?: boolean;
-          deletedByUser2?: boolean;
-        }) => {
-          if (data.permanentlyDeleted) {
-            // Remove message from the list
-            setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
-          } else {
-            // For soft delete, we could show a "deleted message" placeholder
-            // For now, we'll just remove it from the current user's view
-            setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
-          }
-        });
-
-        // Listen for conversation list updates (when messages are deleted)
-        socketInstance.on('conversation-list-updated', (data: { 
-          conversationId: string; 
-          messageDeleted: boolean;
-        }) => {
-          if (data.messageDeleted) {
-            // Reload conversations to update the last message preview
-            loadConversations();
-          }
-        });
-
-        // Listen for typing indicators
-        socketInstance.on('typing', (data: { userId: string; isTyping: boolean; conversationId: string }) => {
-          if (data.conversationId === selectedConversation?.id) {
-            if (data.isTyping) {
-              setTypingUsers(prev => [...prev.filter(id => id !== data.userId), data.userId]);
-            } else {
-              setTypingUsers(prev => prev.filter(id => id !== data.userId));
-            }
-          }
-        });
-
-        // Listen for user status updates
-        socketInstance.on('user-status-updated', (data: { userId: string; status: string; lastSeen: string }) => {
-          setConversations(prev => 
-            prev.map(conv => ({
-              ...conv,
-              otherUser: conv.otherUser.id === data.userId 
-                ? { ...conv.otherUser, status: data.status as any, lastSeen: data.lastSeen }
-                : conv.otherUser
-            }))
-          );
-        });
       };
 
       initSocket();
 
       return () => {
         if (socket) {
+          socket.off('connect');
+          socket.off('disconnect');
+          socket.off('new-message');
+          socket.off('user-status-updated');
+          socket.off('conversation-updated');
+          socket.off('conversation-created');
+          socket.off('message-deleted');
+          socket.off('conversation-list-updated');
+          socket.off('typing');
+          socket.off('typing-stopped');
           socket.disconnect();
         }
       };
     }
   }, [user]);
 
+  // Set up socket listeners
+  useEffect(() => {
+    if (socket && user) {
+      console.log('Setting up socket listeners for user:', user.uid);
+      
+      // Check if socket is already connected
+      if (socket.connected) {
+        console.log('Socket already connected, joining user room');
+        socket.emit('join', user.uid);
+        setIsConnected(true);
+      }
+      
+      socket.on('connect', () => {
+        console.log('Connected to server');
+        setIsConnected(true);
+        socket.emit('join', user.uid);
+      });
+
+      socket.on('disconnect', () => {
+        console.log('Disconnected from server');
+        setIsConnected(false);
+      });
+
+      // Listen for new messages
+      socket.on('new-message', (message: Message) => {
+        console.log('=== NEW MESSAGE RECEIVED ===');
+        console.log('Message:', message);
+        console.log('Current selected conversation (ref):', selectedConversationRef.current?.id);
+        console.log('Message conversation ID:', message.conversationId);
+        console.log('Current conversations count:', conversations.length);
+        
+        // Update conversation list with new message and increment unread count
+        setConversations(prev => {
+          console.log('Updating conversations, current count:', prev.length);
+          const updated = prev.map(conv => {
+            if (conv.id === message.conversationId) {
+              const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
+              const isOwnMessage = message.sender?.firebaseUid === user.uid;
+              
+              console.log('Found matching conversation:', conv.id);
+              console.log('Is current conversation:', isCurrentConversation);
+              console.log('Is own message:', isOwnMessage);
+              console.log('Previous unread count:', conv.unreadCount);
+              
+              const updatedConv = {
+                ...conv,
+                lastMessage: message,
+                lastMessageAt: message.createdAt,
+                // Increment unread count only if it's not the current conversation and not our own message
+                unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
+              };
+              
+              console.log('New unread count:', updatedConv.unreadCount);
+              return updatedConv;
+            }
+            return conv;
+          });
+          console.log('Updated conversations count:', updated.length);
+          return updated;
+        });
+        
+        // Only add message to current messages if it belongs to the currently selected conversation
+        setMessages(prev => {
+          // Check if we're currently viewing this conversation using ref
+          if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
+            console.log('Adding message to current conversation');
+            return [...prev, message];
+          } else {
+            console.log('Message not for current conversation, ignoring');
+            return prev;
+          }
+        });
+      });
+
+      // Listen for conversation updates
+      socket.on('conversation-updated', (data: any) => {
+        setConversations(prev => 
+          prev.map(conv => 
+            conv.id === data.conversationId 
+              ? { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt }
+              : conv
+          )
+        );
+      });
+
+      // Listen for new conversations
+      socket.on('conversation-created', (conversation: Conversation) => {
+        setConversations(prev => {
+          // Check if conversation already exists to prevent duplicates
+          const exists = prev.some(conv => conv.id === conversation.id);
+          if (exists) {
+            return prev;
+          }
+          return [conversation, ...prev];
+        });
+      });
+
+      // Listen for message deletions
+      socket.on('message-deleted', (data: { 
+        messageId: string; 
+        permanentlyDeleted: boolean;
+        deletedByUser1?: boolean;
+        deletedByUser2?: boolean;
+      }) => {
+        if (data.permanentlyDeleted) {
+          // Remove message from the list
+          setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
+        } else {
+          // Soft delete - just filter out the message
+          setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
+        }
+      });
+
+      // Listen for conversation list updates (when messages are deleted)
+      socket.on('conversation-list-updated', (data: { 
+        conversationId: string; 
+        messageDeleted: boolean;
+      }) => {
+        if (data.messageDeleted) {
+          // Reload conversations to update the last message preview
+          loadConversations();
+        }
+      });
+
+      // Listen for typing indicators
+      socket.on('typing', (data: { 
+        userId: string; 
+        username: string; 
+        displayName: string; 
+        isTyping: boolean; 
+        conversationId: string 
+      }) => {
+        console.log('Typing indicator received:', data);
+        
+        // Update typing users state
+        setTypingUsers(prev => {
+          const newTypingUsers = { ...prev };
+          
+          if (data.isTyping) {
+            newTypingUsers[data.conversationId] = {
+              username: data.username,
+              displayName: data.displayName
+            };
+          } else {
+            delete newTypingUsers[data.conversationId];
+          }
+          
+          return newTypingUsers;
+        });
+
+        // Don't update conversation preview when typing - just show typing indicator
+        // The conversation preview should remain unchanged to preserve unread count
+      });
+
+      // Listen for user status updates
+      socket.on('user-status-updated', (data: { userId: string; status: string; lastSeen: string }) => {
+        setConversations(prev => 
+          prev.map(conv => ({
+            ...conv,
+            otherUser: conv.otherUser.id === data.userId 
+              ? { ...conv.otherUser, status: data.status as any, lastSeen: data.lastSeen }
+              : conv.otherUser
+          }))
+        );
+      });
+    }
+
+    return () => {
+      if (socket) {
+        socket.off('connect');
+        socket.off('disconnect');
+        socket.off('new-message');
+        socket.off('user-status-updated');
+        socket.off('conversation-updated');
+        socket.off('conversation-created');
+        socket.off('message-deleted');
+        socket.off('conversation-list-updated');
+        socket.off('typing');
+        socket.off('typing-stopped');
+      }
+    };
+  }, [socket, user]);
+
   // Load conversations
   useEffect(() => {
     if (user && socket) {
+      console.log('Loading conversations for user:', user.uid);
       loadConversations();
     }
   }, [user, socket]);
@@ -357,6 +436,7 @@ export default function ChatPage() {
 
   const loadConversations = async () => {
     try {
+      console.log('=== LOADING CONVERSATIONS ===');
       const token = await user?.getIdToken();
       const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/conversations`, {
         headers: {
@@ -374,6 +454,7 @@ export default function ChatPage() {
       }
       
       const data = await response.json();
+      console.log('Loaded conversations:', data.length);
       // Ensure data is an array before setting it
       if (Array.isArray(data)) {
         setConversations(data);
@@ -683,7 +764,7 @@ export default function ChatPage() {
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-center">
           <h1 className="text-2xl font-bold text-red-600 mb-4">Authentication Error</h1>
-          <p className="text-gray-600 mb-4">{error}</p>
+          <p className="text-gray-600 mb-4">{error?.message || String(error)}</p>
           <button
             onClick={handleSignOut}
             className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
@@ -736,7 +817,7 @@ export default function ChatPage() {
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
                   searchUsers(e.target.value);
-                  setShowSearch(e.target.value && e.target.value.length > 0);
+                  setShowSearch(!!(e.target.value && e.target.value.length > 0));
                 }}
                 className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
@@ -770,7 +851,7 @@ export default function ChatPage() {
                     )}
                   </div>
                   <div className="flex-1">
-                    <p className="font-semibold text-gray-800">@{user.username}</p>
+                    <p className="font-semibold text-gray-800">{user.username}</p>
                     <p className="text-sm text-gray-600">{user.displayName}</p>
                   </div>
                   <div className={`w-3 h-3 rounded-full ${
@@ -811,7 +892,7 @@ export default function ChatPage() {
                     <p className={`font-semibold truncate ${
                       conversation.unreadCount > 0 ? 'text-gray-900 font-bold' : 'text-gray-800'
                     }`}>
-                      @{conversation.otherUser.username}
+                      {conversation.otherUser.username}
                     </p>
                     <div className="flex items-center space-x-2">
                       {conversation.unreadCount > 0 && (
@@ -831,7 +912,11 @@ export default function ChatPage() {
                   <p className={`text-sm truncate ${
                     conversation.unreadCount > 0 ? 'text-gray-800 font-medium' : 'text-gray-600'
                   }`}>
-                    {conversation.lastMessage ? (
+                    {typingUsers[conversation.id] ? (
+                      <span className="text-blue-600 italic">
+                        typing...
+                      </span>
+                    ) : conversation.lastMessage ? (
                       conversation.lastMessage.messageType === 'TEXT' 
                         ? conversation.lastMessage.content
                         : `📎 ${conversation.lastMessage.messageType.toLowerCase()}`
@@ -862,7 +947,7 @@ export default function ChatPage() {
                 </div>
                 <div>
                   <h2 className="font-semibold text-gray-800">
-                    @{selectedConversation.otherUser.username}
+                    {selectedConversation.otherUser.username}
                   </h2>
                   <p className="text-sm text-gray-600">
                     {selectedConversation.otherUser.status === 'ONLINE' ? 'Online' : 'Offline'}
@@ -920,9 +1005,9 @@ export default function ChatPage() {
                 </div>
                 );
               })}
-              {typingUsers && typingUsers.length > 0 && (
-                <div className="text-sm text-gray-500 italic">
-                  {typingUsers.join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...
+              {selectedConversation && typingUsers[selectedConversation.id] && (
+                <div className="text-sm text-blue-600 italic animate-pulse">
+                  typing...
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -931,16 +1016,34 @@ export default function ChatPage() {
             {/* File Preview */}
             {previewUrl && selectedFile && (
               <div className="p-4 border-t bg-gray-50">
-                <MediaPreview 
-                  file={selectedFile}
-                  previewUrl={previewUrl}
-                  onSendImage={() => uploadMedia(selectedFile)}
-                  onSendVideo={() => uploadMedia(selectedFile)}
-                  onCancel={() => {
-                    setSelectedFile(null);
-                    setPreviewUrl(null);
-                  }}
-                />
+                <div className="flex items-center space-x-4">
+                  {selectedFile.type.startsWith('image/') ? (
+                    <img src={previewUrl} alt="Preview" className="w-20 h-20 object-cover rounded" />
+                  ) : selectedFile.type.startsWith('video/') ? (
+                    <video src={previewUrl} className="w-20 h-20 object-cover rounded" controls />
+                  ) : null}
+                  <div className="flex-1">
+                    <p className="text-sm text-gray-600">{selectedFile.name}</p>
+                    <p className="text-xs text-gray-500">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                  </div>
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => uploadMedia(selectedFile)}
+                      className="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700"
+                    >
+                      Send
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFile(null);
+                        setPreviewUrl(null);
+                      }}
+                      className="bg-gray-500 text-white px-3 py-1 rounded text-sm hover:bg-gray-600"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 

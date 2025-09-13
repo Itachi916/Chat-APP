@@ -1,10 +1,23 @@
+let socketInstance: any = null;
+
 export async function getSocket() {
+  if (socketInstance && socketInstance.connected) {
+    return socketInstance;
+  }
+  
   const { io } = await import('socket.io-client');
-  const socket = io(process.env.NEXT_PUBLIC_SERVER_URL as string, { 
+  socketInstance = io(process.env.NEXT_PUBLIC_SERVER_URL as string, { 
     withCredentials: true,
     transports: ['websocket', 'polling'],
   });
-  return socket;
+  return socketInstance;
+}
+
+export function disconnectSocket() {
+  if (socketInstance) {
+    socketInstance.disconnect();
+    socketInstance = null;
+  }
 }
 
 export function emitJoin(socket: any, userId: string) {

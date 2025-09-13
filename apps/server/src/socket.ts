@@ -118,14 +118,51 @@ export function setupSocketHandlers(io: SocketIOServer) {
     });
 
     // Handle typing indicators
-    socket.on('typing', (data: { conversationId: string; isTyping: boolean }) => {
+    socket.on('typing', async (data: { conversationId: string; isTyping: boolean }) => {
       if (!socket.data.userId) return;
       
-      socket.to(`conversation:${data.conversationId}`).emit('typing', {
-        userId: socket.data.userId,
-        isTyping: data.isTyping,
-        conversationId: data.conversationId,
-      });
+      try {
+        // Get user info for typing indicator
+        const user = await prisma.user.findUnique({
+          where: { id: socket.data.userId },
+          select: { id: true, username: true, displayName: true, firebaseUid: true }
+        });
+
+        if (!user) return;
+
+        // Get the other user in this conversation
+        const conversation = await prisma.conversation.findFirst({
+          where: { id: data.conversationId },
+          include: {
+            user1: { select: { id: true, firebaseUid: true } },
+            user2: { select: { id: true, firebaseUid: true } }
+          }
+        });
+
+        if (!conversation) return;
+
+        const otherUser = conversation.user1Id === user.id ? conversation.user2 : conversation.user1;
+        
+        // Emit typing indicator to the other user's Firebase UID room
+        io.to(`user:${otherUser.firebaseUid}`).emit('typing', {
+          userId: socket.data.userId,
+          username: user.username,
+          displayName: user.displayName,
+          isTyping: data.isTyping,
+          conversationId: data.conversationId,
+        });
+
+        // Also emit to conversation room for real-time updates
+        socket.to(`conversation:${data.conversationId}`).emit('typing', {
+          userId: socket.data.userId,
+          username: user.username,
+          displayName: user.displayName,
+          isTyping: data.isTyping,
+          conversationId: data.conversationId,
+        });
+      } catch (error) {
+        console.error('Typing indicator error:', error);
+      }
     });
 
     // Handle message sending

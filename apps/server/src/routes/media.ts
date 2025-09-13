@@ -2,7 +2,48 @@ import { Router } from 'express';
 import multer from 'multer';
 import { getPresignedUploadUrl, getPresignedDownloadUrl } from '../s3';
 import { prisma } from '../lib/prisma';
-import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
+import { authenticateToken, validateConversationAccess, AuthenticatedRequest } from '../middleware/auth';
+
+import crypto from 'crypto';
+
+// Helper function to generate S3 key with content-based hashing
+function generateS3Key(fileName: string, fileType: string, conversationId: string, fileBuffer?: Buffer): string {
+  const fileExtension = fileName.split('.').pop() || '';
+  
+  // Determine if it's an image or video based on file type
+  const isImage = fileType.startsWith('image/');
+  const isVideo = fileType.startsWith('video/');
+  
+  // Create folder structure: chats/conversationId/images|videos/
+  const folderType = isImage ? 'images' : isVideo ? 'videos' : 'files';
+  
+  // Generate content hash for deduplication
+  let contentHash = '';
+  if (fileBuffer) {
+    contentHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+  } else {
+    // Fallback to timestamp if no buffer provided
+    contentHash = Date.now().toString();
+  }
+  
+  // Clean filename (remove special characters)
+  const cleanFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+  
+  return `chats/${conversationId}/${folderType}/${contentHash}-${cleanFileName}`;
+}
+
+// Helper function to check if file already exists in conversation
+async function checkFileExists(conversationId: string, contentHash: string): Promise<boolean> {
+  const existingMedia = await prisma.media.findFirst({
+    where: {
+      conversationId: conversationId,
+      s3Key: {
+        contains: contentHash
+      }
+    }
+  });
+  return !!existingMedia;
+}
 
 const router = Router();
 
@@ -15,9 +56,10 @@ const upload = multer({
 });
 
 // Get presigned URL for file upload
-router.post('/upload-url', authenticateToken, async (req: AuthenticatedRequest, res) => {
+router.post('/upload-url/:conversationId', authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
   try {
-    const { fileName, fileType, conversationId, messageId } = req.body;
+    const { conversationId } = req.params;
+    const { fileName, fileType, messageId } = req.body;
     
     if (!fileName || !fileType) {
       return res.status(400).json({ error: 'File name and type are required' });
@@ -32,15 +74,17 @@ router.post('/upload-url', authenticateToken, async (req: AuthenticatedRequest, 
       return res.status(404).json({ error: 'Current user not found' });
     }
 
-    const key = `media/${Date.now()}-${fileName}`;
+    // For presigned URLs, we can't check duplicates before upload
+    // So we'll generate the key and let the frontend handle it
+    const key = generateS3Key(fileName, fileType, conversationId);
     const uploadUrl = await getPresignedUploadUrl(key, fileType);
-    const s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+    const s3Url = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
     
     // Create media record in database
     const media = await prisma.media.create({
       data: {
         userId: currentUser.id,
-        conversationId: conversationId || null,
+        conversationId: conversationId,
         messageId: messageId || null,
         fileName,
         fileType,
@@ -55,7 +99,7 @@ router.post('/upload-url', authenticateToken, async (req: AuthenticatedRequest, 
       key,
       mediaId: media.id,
       s3Url,
-      expiresIn: 3600 // 1 hour
+      expiresIn: 300 // 5 minutes
     });
   } catch (error) {
     console.error('Upload URL error:', error);
@@ -102,13 +146,16 @@ router.post('/confirm-upload', authenticateToken, async (req: AuthenticatedReque
   }
 });
 
-// Get presigned URL for file download
+// Get presigned URL for file download (5 minutes expiry for security)
 router.get('/download-url/:key', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
     const { key } = req.params;
     const downloadUrl = await getPresignedDownloadUrl(key);
     
-    res.json({ downloadUrl });
+    res.json({ 
+      downloadUrl,
+      expiresIn: 300 // 5 minutes
+    });
   } catch (error) {
     console.error('Download URL error:', error);
     res.status(500).json({ error: 'Failed to generate download URL' });
@@ -194,14 +241,15 @@ router.delete('/:mediaId', authenticateToken, async (req: AuthenticatedRequest, 
 });
 
 // Handle direct file upload (alternative to presigned URLs)
-router.post('/upload', upload.single('file'), authenticateToken, async (req: AuthenticatedRequest, res) => {
+router.post('/upload/:conversationId', upload.single('file'), authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    const { conversationId } = req.params;
     const { originalname, mimetype, buffer } = req.file;
-    const { conversationId, messageId } = req.body;
+    const { messageId } = req.body;
     
     const currentUser = await prisma.user.findUnique({
       where: { firebaseUid: req.user!.uid },
@@ -212,15 +260,57 @@ router.post('/upload', upload.single('file'), authenticateToken, async (req: Aut
       return res.status(404).json({ error: 'Current user not found' });
     }
 
-    const key = `media/${Date.now()}-${originalname}`;
+    // Generate content hash for deduplication
+    const contentHash = crypto.createHash('md5').update(buffer).digest('hex');
+    
+    // Check if file already exists in this conversation
+    const fileExists = await checkFileExists(conversationId, contentHash);
+    
+    if (fileExists) {
+      // File already exists, create new media record with same S3 URL
+      const existingMedia = await prisma.media.findFirst({
+        where: {
+          conversationId: conversationId,
+          s3Key: {
+            contains: contentHash
+          }
+        }
+      });
+      
+      // Create new media record pointing to existing S3 file
+      const media = await prisma.media.create({
+        data: {
+          userId: currentUser.id,
+          conversationId: conversationId,
+          messageId: messageId || null,
+          fileName: originalname,
+          fileType: mimetype,
+          fileSize: buffer.length,
+          s3Key: existingMedia!.s3Key, // Same S3 key
+          s3Url: existingMedia!.s3Url, // Same S3 URL
+        },
+      });
+      
+      return res.json({
+        id: media.id,
+        key: media.s3Key,
+        url: media.s3Url,
+        fileName: originalname,
+        fileType: mimetype,
+        size: buffer.length
+      });
+    }
+    
+    // Generate organized S3 key with content hash
+    const key = generateS3Key(originalname, mimetype, conversationId, buffer);
     const uploadUrl = await getPresignedUploadUrl(key, mimetype);
-    const s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+    const s3Url = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
     
     // Create media record in database
     const media = await prisma.media.create({
       data: {
         userId: currentUser.id,
-        conversationId: conversationId || null,
+        conversationId: conversationId,
         messageId: messageId || null,
         fileName: originalname,
         fileType: mimetype,
@@ -241,6 +331,31 @@ router.post('/upload', upload.single('file'), authenticateToken, async (req: Aut
   } catch (error) {
     console.error('File upload error:', error);
     res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+
+// Security logout endpoint
+router.post('/security-logout', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { reason } = req.body;
+    
+    console.log(`🚨 Security Logout: User ${req.user!.uid} logged out due to: ${reason}`);
+    
+    // Here you could add additional security measures like:
+    // - Blacklist the token
+    // - Log the security incident
+    // - Notify administrators
+    // - Invalidate all user sessions
+    
+    res.json({ 
+      message: 'Session terminated for security reasons',
+      reason: reason || 'security_violation',
+      logout: true
+    });
+  } catch (error) {
+    console.error('Security logout error:', error);
+    res.status(500).json({ error: 'Failed to process security logout' });
   }
 });
 
