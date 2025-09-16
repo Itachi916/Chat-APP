@@ -134,3 +134,6 @@ secrets.json
 config.json
 credentials.json
 private.json
+
+conversation_flow_explanation.txt
+REACT_RERENDERING_FIX.md
