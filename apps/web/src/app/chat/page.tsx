@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, Suspense } from 'react';
+import { useState, useEffect, useRef, Suspense, useCallback, useMemo } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../lib/firebase';
 import { getSocket, disconnectSocket } from '../../lib/socket';
@@ -9,6 +9,8 @@ import { signOut } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { User, Conversation, Message, Media, MessageReceipt } from './types';
+import MessageList from './components/MessageList';
+import MessageInput from './components/MessageInput';
 
 // Dynamic imports for better code splitting
 const ChatSidebar = dynamic(() => import('./components/ChatSidebar'), {
@@ -42,6 +44,7 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const selectedConversationRef = useRef<Conversation | null>(null);
+  const messageIdsRef = useRef<Set<string>>(new Set());
 
   // Redirect to landing page if not authenticated
   useEffect(() => {
@@ -51,7 +54,7 @@ export default function ChatPage() {
   }, [user, loading, router]);
 
   // Handle sign out
-  const handleSignOut = async () => {
+  const handleSignOut = useCallback(async () => {
     try {
       // Disconnect socket before signing out
       if (socket) {
@@ -64,7 +67,7 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Sign out error:', error);
     }
-  };
+  }, [socket, router]);
 
   // Scroll to bottom when new messages arrive
   const scrollToBottom = () => {
@@ -178,43 +181,45 @@ export default function ChatPage() {
 
         // Listen for new messages
         socketInstance.on('new-message', (message: Message) => {
-          
-          // Update conversation list with new message and increment unread count
-          setConversations(prev => {
-            const updated = prev.map(conv => {
-              if (conv.id === message.conversationId) {
-                const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
-                const isOwnMessage = message.sender?.firebaseUid === user.uid;
-                
-                const updatedConv = {
-                  ...conv,
-                  lastMessage: message,
-                  lastMessageAt: message.createdAt,
-                  // Increment unread count only if it's not the current conversation and not our own message
-                  unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
-                };
-                
-                return updatedConv;
-              }
-              return conv;
+          // Check for duplicates using ref
+          if (messageIdsRef.current.has(message.id)) {
+            return; // Skip duplicate message
+          }
+          messageIdsRef.current.add(message.id);
+
+          const isOwnMessage = message.sender?.firebaseUid === user.uid;
+          const isCurrentConversation = selectedConversationRef.current?.id === message.conversationId;
+
+          // Only update conversations if not current conversation or not own message
+          if (!isCurrentConversation || !isOwnMessage) {
+            setConversations(prev => {
+              const updated = prev.map(conv => {
+                if (conv.id === message.conversationId) {
+                  return {
+                    ...conv,
+                    lastMessage: message,
+                    lastMessageAt: message.createdAt,
+                    // Increment unread count only if it's not the current conversation and not our own message
+                    unreadCount: isCurrentConversation || isOwnMessage ? conv.unreadCount : conv.unreadCount + 1
+                  };
+                }
+                return conv;
+              });
+              return updated;
             });
-            return updated;
-          });
+          }
           
           // Only add message to current messages if it belongs to the currently selected conversation
-          setMessages(prev => {
-            // Check if we're currently viewing this conversation using ref
-            if (selectedConversationRef.current && message.conversationId === selectedConversationRef.current.id) {
-              // Check if message already exists to prevent duplicates
+          if (isCurrentConversation) {
+            setMessages(prev => {
+              // Double-check for duplicates (safety measure)
               const messageExists = prev.some(m => m.id === message.id);
               if (messageExists) {
                 return prev;
               }
               return [...prev, message];
-            } else {
-              return prev;
-            }
-          });
+            });
+          }
         });
 
         // Listen for conversation updates
@@ -397,10 +402,7 @@ export default function ChatPage() {
     }
   }, [selectedConversation, socket]);
 
-  // Auto-scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  // Auto-scroll is now handled in MessageList component
 
   // Handle visibility change and focus (when user returns to chat)
   useEffect(() => {
@@ -471,7 +473,7 @@ export default function ChatPage() {
     }
   };
 
-  const loadMessages = async () => {
+  const loadMessages = useCallback(async () => {
     if (!selectedConversation) return;
     
     try {
@@ -496,7 +498,15 @@ export default function ChatPage() {
       }
       
       const data = await response.json();
-      setMessages(data.messages || []);
+      const messages = data.messages || [];
+      
+      // Clear messageIdsRef and populate with loaded messages
+      messageIdsRef.current.clear();
+      messages.forEach((msg: Message) => {
+        messageIdsRef.current.add(msg.id);
+      });
+      
+      setMessages(messages);
       
       // Scroll to bottom after messages are loaded
       setTimeout(() => {
@@ -506,9 +516,9 @@ export default function ChatPage() {
       console.error('Failed to load messages:', error);
       setMessages([]); // Ensure messages is always an array
     }
-  };
+  }, [selectedConversation, user]);
 
-  const searchUsers = async (query: string) => {
+  const searchUsers = useCallback(async (query: string) => {
     if (!query.trim()) {
       setSearchResults([]);
       return;
@@ -540,9 +550,9 @@ export default function ChatPage() {
       console.error('Failed to search users:', error);
       setSearchResults([]);
     }
-  };
+  }, [user]);
 
-  const createDirectConversation = async (userId: string) => {
+  const createDirectConversation = useCallback(async (userId: string) => {
     try {
       const token = await user?.getIdToken();
       const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/conversations/start`, {
@@ -581,9 +591,9 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to create conversation:', error);
     }
-  };
+  }, [user]);
 
-  const sendMessage = async () => {
+  const sendMessage = useCallback(async () => {
     if (!newMessage.trim() || !selectedConversation || !socket) return;
 
     try {
@@ -603,9 +613,9 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to send message:', error);
     }
-  };
+  }, [newMessage, selectedConversation, socket]);
 
-  const deleteMessage = async (messageId: string) => {
+  const deleteMessage = useCallback(async (messageId: string) => {
     if (!socket) return;
 
     try {
@@ -614,7 +624,7 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to delete message:', error);
     }
-  };
+  }, [socket]);
 
   const markMessagesAsRead = async (conversationId: string) => {
     try {
@@ -642,7 +652,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleTyping = () => {
+  const handleTyping = useCallback(() => {
     if (!selectedConversation || !socket) return;
 
     // Emit typing indicator
@@ -657,16 +667,16 @@ export default function ChatPage() {
     typingTimeoutRef.current = setTimeout(() => {
       socket.emit('typing', { conversationId: selectedConversation.id, isTyping: false });
     }, 1000);
-  };
+  }, [selectedConversation, socket]);
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       setSelectedFile(file);
       const url = URL.createObjectURL(file);
       setPreviewUrl(url);
     }
-  };
+  }, []);
 
   // Calculate MD5 hash of file content using Web Crypto API
   const calculateFileHash = async (file: File): Promise<string> => {
@@ -848,12 +858,20 @@ export default function ChatPage() {
     }
   };
 
-  const formatTime = (timestamp: string) => {
+  const formatTime = useCallback((timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
+  }, []);
+
+  const handleMessageChange = useCallback((value: string) => {
+    setNewMessage(value);
+  }, []);
+
+  const handleImageClick = useCallback((url: string, fileName: string) => {
+    setViewingImage({url, fileName});
+  }, []);
 
   // Function to get presigned URL for media viewing
-  const getMediaViewUrl = async (mediaId: string): Promise<string | null> => {
+  const getMediaViewUrl = useCallback(async (mediaId: string): Promise<string | null> => {
     try {
       const token = await user?.getIdToken();
       const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/view-url/${mediaId}`, {
@@ -873,128 +891,9 @@ export default function ChatPage() {
       console.error('Error getting media view URL:', error);
       return null;
     }
-  };
+  }, [user]);
 
-  // Component for rendering media with presigned URLs
-  const MediaImage = ({ media }: { media: any }) => {
-    const [imageUrl, setImageUrl] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(false);
-
-    useEffect(() => {
-      const fetchImageUrl = async () => {
-        try {
-          setLoading(true);
-          const url = await getMediaViewUrl(media.id);
-          if (url) {
-            setImageUrl(url);
-          } else {
-            setError(true);
-          }
-        } catch (err) {
-          console.error('Error fetching image URL:', err);
-          setError(true);
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      fetchImageUrl();
-    }, [media.id]);
-
-    if (loading) {
-      return (
-        <div className="flex items-center justify-center p-4 bg-gray-100 rounded">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        </div>
-      );
-    }
-
-    if (error || !imageUrl) {
-      return (
-        <div className="flex items-center justify-center p-4 bg-gray-100 rounded text-gray-500">
-          Failed to load image
-        </div>
-      );
-    }
-
-    return (
-      <img 
-        src={imageUrl} 
-        alt={media.fileName || "Shared image"} 
-        className="w-full h-auto rounded border border-gray-400 scale-80 cursor-pointer hover:opacity-90 transition-opacity"
-        onClick={() => setViewingImage({url: imageUrl, fileName: media.fileName || "image"})}
-        onLoad={() => {
-          // Scroll to bottom when image loads to ensure we see the latest content
-          setTimeout(() => scrollToBottom(), 50);
-        }}
-        onError={(e) => {
-          console.error('Image failed to load:', e);
-          setError(true);
-        }}
-      />
-    );
-  };
-
-  // Component for rendering video with presigned URLs
-  const MediaVideo = ({ media }: { media: any }) => {
-    const [videoUrl, setVideoUrl] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(false);
-
-    useEffect(() => {
-      const fetchVideoUrl = async () => {
-        try {
-          setLoading(true);
-          const url = await getMediaViewUrl(media.id);
-          if (url) {
-            setVideoUrl(url);
-          } else {
-            setError(true);
-          }
-        } catch (err) {
-          console.error('Error fetching video URL:', err);
-          setError(true);
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      fetchVideoUrl();
-    }, [media.id]);
-
-    if (loading) {
-      return (
-        <div className="flex items-center justify-center p-4 bg-gray-100 rounded">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        </div>
-      );
-    }
-
-    if (error || !videoUrl) {
-      return (
-        <div className="flex items-center justify-center p-4 bg-gray-100 rounded text-gray-500">
-          Failed to load video
-        </div>
-      );
-    }
-
-    return (
-      <video 
-        src={videoUrl} 
-        controls 
-        className="w-full h-auto rounded border border-gray-400 scale-80"
-        onLoadedData={() => {
-          // Scroll to bottom when video loads to ensure we see the latest content
-          setTimeout(() => scrollToBottom(), 50);
-        }}
-        onError={(e) => {
-          console.error('Video failed to load:', e);
-          setError(true);
-        }}
-      />
-    );
-  };
+  // Media components are now in MessageItem.tsx for better performance
 
   const formatDate = (timestamp: string) => {
     const date = new Date(timestamp);
@@ -1096,121 +995,78 @@ export default function ChatPage() {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 h-0">
-              {Array.isArray(messages) && messages.map((message) => {
-                const isOwnMessage = message.sender?.firebaseUid === user.uid;
-                return (
-                <div key={message.id} className={`flex ${isOwnMessage ? 'justify-end' : 'justify-start'} group`}>
-                  <div className={`max-w-xs lg:max-w-md rounded-lg relative ${
-                    message.messageType === 'IMAGE' || message.messageType === 'VIDEO'
-                      ? 'bg-white'
-                      : isOwnMessage 
-                        ? 'bg-blue-500 text-white px-4 py-2' 
-                        : 'bg-gray-200 text-gray-800 px-4 py-2'
-                  }`}>
-                    {message.messageType === 'TEXT' && (
-                      <div>{message.content}</div>
-                    )}
-                    {message.messageType === 'IMAGE' && message.media[0] && (
-                      <div className="pb-6">
-                        <MediaImage media={message.media[0]} />
-                      </div>
-                    )}
-                    {message.messageType === 'VIDEO' && message.media[0] && (
-                      <div className="pb-6">
-                        <MediaVideo media={message.media[0]} />
-                      </div>
-                    )}
-                    <div className={`flex justify-between items-center ${
-                      message.messageType === 'IMAGE' || message.messageType === 'VIDEO'
-                        ? 'bg-gray-200 text-gray-800 px-2 py-1 -mx-1 -mb-1 rounded-b-lg absolute bottom-0 left-0 right-0'
-                        : 'mt-1'
-                    }`}>
-                      <div className="text-xs opacity-75">
-                        {formatTime(message.createdAt)}
-                      </div>
-                      <button
-                        onClick={() => {
-                          if (window.confirm('Are you sure you want to delete this message?')) {
-                            deleteMessage(message.id);
-                          }
-                        }}
-                        className={`ml-2 text-xs opacity-0 group-hover:opacity-100 transition-opacity ${
-                          isOwnMessage 
-                            ? 'text-blue-100 hover:text-white' 
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                        title="Delete message"
-                      >
-                        🗑️
-                      </button>
-        </div>
-      </div>
-
-      {/* Image Viewer Modal */}
-      {viewingImage && (
-        <div 
-          className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4"
-          onClick={() => setViewingImage(null)}
-        >
-          <div 
-            className="relative max-w-4xl max-h-full w-full h-full flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header with close button and download */}
-            <div className="flex justify-between items-center p-4 bg-black bg-opacity-50 text-white">
-              <h3 className="text-lg font-medium truncate">{viewingImage.fileName}</h3>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => {
-                    const link = document.createElement('a');
-                    link.href = viewingImage.url;
-                    link.download = viewingImage.fileName;
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                  }}
-                  className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-                  title="Download image"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => setViewingImage(null)}
-                  className="p-2 bg-gray-600 hover:bg-gray-700 rounded-lg transition-colors"
-                  title="Close"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
+            <MessageList
+              messages={messages}
+              currentUserId={user.uid}
+              onDeleteMessage={deleteMessage}
+              formatTime={formatTime}
+              getMediaViewUrl={getMediaViewUrl}
+              onImageClick={handleImageClick}
+            />
             
-            {/* Image container */}
-            <div className="flex-1 flex items-center justify-center p-4">
-              <img
-                src={viewingImage.url}
-                alt={viewingImage.fileName}
-                className="max-w-full max-h-full object-contain rounded-lg"
-                onClick={(e) => e.stopPropagation()}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-})}
-              {selectedConversation && typingUsers[selectedConversation.id] && (
+            {/* Typing Indicator */}
+            {selectedConversation && typingUsers[selectedConversation.id] && (
+              <div className="px-4 py-2">
                 <div className="text-sm text-blue-600 italic animate-pulse">
                   typing...
                 </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
+              </div>
+            )}
+
+            {/* Image Viewer Modal */}
+            {viewingImage && (
+              <div 
+                className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4"
+                onClick={() => setViewingImage(null)}
+              >
+                <div 
+                  className="relative max-w-4xl max-h-full w-full h-full flex flex-col"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {/* Header with close button and download */}
+                  <div className="flex justify-between items-center p-4 bg-black bg-opacity-50 text-white">
+                    <h3 className="text-lg font-medium truncate">{viewingImage.fileName}</h3>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = viewingImage.url;
+                          link.download = viewingImage.fileName;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                        className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                        title="Download image"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => setViewingImage(null)}
+                        className="p-2 bg-gray-600 hover:bg-gray-700 rounded-lg transition-colors"
+                        title="Close"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Image container */}
+                  <div className="flex-1 flex items-center justify-center p-4">
+                    <img
+                      src={viewingImage.url}
+                      alt={viewingImage.fileName}
+                      className="max-w-full max-h-full object-contain rounded-lg"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* File Preview */}
             {previewUrl && selectedFile && (
@@ -1247,41 +1103,13 @@ export default function ChatPage() {
             )}
 
             {/* Message Input */}
-            <div className="p-4 border-t bg-white">
-              <div className="flex space-x-2">
-                <input
-                  type="file"
-                  accept="image/*,video/*"
-                  onChange={handleFileSelect}
-                  className="hidden"
-                  id="file-input"
-                />
-                <label
-                  htmlFor="file-input"
-                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg cursor-pointer transition-colors"
-                >
-                  📎
-                </label>
-                <input
-                  type="text"
-                  value={newMessage}
-                  onChange={(e) => {
-                    setNewMessage(e.target.value);
-                    handleTyping();
-                  }}
-                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  placeholder="Type a message..."
-                  className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={!newMessage.trim()}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-6 py-2 rounded-lg transition-colors"
-                >
-                  Send
-                </button>
-              </div>
-            </div>
+            <MessageInput
+              newMessage={newMessage}
+              onMessageChange={handleMessageChange}
+              onSendMessage={sendMessage}
+              onFileSelect={handleFileSelect}
+              onTyping={handleTyping}
+            />
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
