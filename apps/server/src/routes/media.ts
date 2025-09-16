@@ -20,7 +20,7 @@ function generateS3Key(fileName: string, fileType: string, conversationId: strin
   // Generate content hash for deduplication
   let contentHash = '';
   if (fileBuffer) {
-    contentHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+    contentHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
   } else {
     // Fallback to timestamp if no buffer provided
     contentHash = Date.now().toString();
@@ -55,22 +55,22 @@ const upload = multer({
   },
 });
 
-// Get presigned URL for file upload
-router.post('/upload-url/:conversationId', authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
+// Check for duplicate file before generating presigned URL
+router.post('/check-duplicate/:conversationId', authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
   try {
     const { conversationId } = req.params;
-    const { fileName, fileType, messageId } = req.body;
+    const { contentHash, fileName, fileType } = req.body;
     
-    console.log('Upload URL request:', {
+    console.log('Duplicate check request:', {
       conversationId,
+      contentHash,
       fileName,
       fileType,
-      messageId,
       user: req.user?.uid
     });
     
-    if (!fileName || !fileType) {
-      return res.status(400).json({ error: 'File name and type are required' });
+    if (!contentHash || !fileName || !fileType) {
+      return res.status(400).json({ error: 'Content hash, file name and type are required' });
     }
 
     const currentUser = await prisma.user.findUnique({
@@ -82,13 +82,94 @@ router.post('/upload-url/:conversationId', authenticateToken, validateConversati
       return res.status(404).json({ error: 'Current user not found' });
     }
 
-    // For presigned URLs, we can't check duplicates before upload
-    // So we'll generate the key and let the frontend handle it
-    const key = generateS3Key(fileName, fileType, conversationId);
+    // Check if file already exists in this conversation
+    const existingMedia = await prisma.media.findFirst({
+      where: {
+        conversationId: conversationId,
+        s3Key: {
+          contains: contentHash
+        }
+      }
+    });
+
+    if (existingMedia) {
+      // File already exists, return existing file info
+      return res.json({
+        isDuplicate: true,
+        existingMedia: {
+          id: existingMedia.id,
+          s3Key: existingMedia.s3Key,
+          s3Url: existingMedia.s3Url,
+          fileName: existingMedia.fileName,
+          fileType: existingMedia.fileType,
+          fileSize: existingMedia.fileSize
+        }
+      });
+    }
+
+    // File doesn't exist, proceed with presigned URL generation
+    res.json({ isDuplicate: false });
+  } catch (error) {
+    console.error('Duplicate check error:', error);
+    res.status(500).json({ error: 'Failed to check for duplicates' });
+  }
+});
+
+// Get presigned URL for file upload (only after duplicate check)
+router.post('/upload-url/:conversationId', authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { fileName, fileType, messageId, contentHash } = req.body;
+    
+    console.log('Upload URL request:', {
+      conversationId,
+      fileName,
+      fileType,
+      messageId,
+      contentHash,
+      user: req.user?.uid
+    });
+    
+    if (!fileName || !fileType || !contentHash) {
+      return res.status(400).json({ error: 'File name, type, and content hash are required' });
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'Current user not found' });
+    }
+
+    // Double-check for duplicates (safety measure)
+    const existingMedia = await prisma.media.findFirst({
+      where: {
+        conversationId: conversationId,
+        s3Key: {
+          contains: contentHash
+        }
+      }
+    });
+
+    if (existingMedia) {
+      return res.status(409).json({ 
+        error: 'File already exists',
+        existingMedia: {
+          id: existingMedia.id,
+          s3Key: existingMedia.s3Key,
+          s3Url: existingMedia.s3Url
+        }
+      });
+    }
+
+    // Generate S3 key with content hash for deduplication
+    const key = generateS3Key(fileName, fileType, conversationId, Buffer.from(contentHash, 'hex'));
     const uploadUrl = await getPresignedUploadUrl(key, fileType);
     const s3Url = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
     
-    // Create media record in database
+    // Create media record in database (will be updated after upload)
     const media = await prisma.media.create({
       data: {
         userId: currentUser.id,
@@ -112,6 +193,70 @@ router.post('/upload-url/:conversationId', authenticateToken, validateConversati
   } catch (error) {
     console.error('Upload URL error:', error);
     res.status(500).json({ error: 'Failed to generate upload URL' });
+  }
+});
+
+// Create media record for duplicate file (reuse existing S3 file)
+router.post('/create-duplicate-media/:conversationId', authenticateToken, validateConversationAccess, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { existingMediaId, messageId, fileName, fileType } = req.body;
+    
+    if (!existingMediaId || !fileName || !fileType) {
+      return res.status(400).json({ error: 'Existing media ID, file name and type are required' });
+    }
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ error: 'Current user not found' });
+    }
+
+    // Get the existing media to reuse its S3 file
+    const existingMedia = await prisma.media.findFirst({
+      where: {
+        id: existingMediaId,
+        conversationId: conversationId
+      }
+    });
+
+    if (!existingMedia) {
+      return res.status(404).json({ error: 'Existing media not found' });
+    }
+
+    // Create new media record pointing to existing S3 file
+    const media = await prisma.media.create({
+      data: {
+        userId: currentUser.id,
+        conversationId: conversationId,
+        messageId: messageId || null,
+        fileName,
+        fileType,
+        fileSize: existingMedia.fileSize,
+        s3Key: existingMedia.s3Key, // Same S3 key
+        s3Url: existingMedia.s3Url, // Same S3 URL
+        width: existingMedia.width,
+        height: existingMedia.height,
+        duration: existingMedia.duration,
+        thumbnailUrl: existingMedia.thumbnailUrl,
+      },
+    });
+
+    res.json({
+      id: media.id,
+      key: media.s3Key,
+      url: media.s3Url,
+      fileName: media.fileName,
+      fileType: media.fileType,
+      size: media.fileSize,
+      isDuplicate: true
+    });
+  } catch (error) {
+    console.error('Create duplicate media error:', error);
+    res.status(500).json({ error: 'Failed to create duplicate media record' });
   }
 });
 
@@ -317,7 +462,7 @@ router.post('/upload/:conversationId', upload.single('file'), authenticateToken,
     }
 
     // Generate content hash for deduplication
-    const contentHash = crypto.createHash('md5').update(buffer).digest('hex');
+    const contentHash = crypto.createHash('sha256').update(buffer).digest('hex');
     
     // Check if file already exists in this conversation
     const fileExists = await checkFileExists(conversationId, contentHash);

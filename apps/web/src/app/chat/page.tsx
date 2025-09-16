@@ -37,6 +37,7 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [showSearch, setShowSearch] = useState(false);
+  const [currentUserProfile, setCurrentUserProfile] = useState<User | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -131,7 +132,10 @@ export default function ChatPage() {
             return;
           }
           
-          // Profile exists, load conversations
+          // Profile exists, store current user profile
+          const profileData = await response.json();
+          setCurrentUserProfile(profileData);
+          
           // Note: Conversations will be loaded when socket initializes
         } catch (error) {
           console.error('Profile check error:', error);
@@ -296,15 +300,46 @@ export default function ChatPage() {
         });
 
         // Listen for user status updates
-        socketInstance.on('user-status-updated', (data: { userId: string; status: string; lastSeen: string }) => {
+        socketInstance.on('user-status-updated', (data: { 
+          userId: string; 
+          firebaseUid?: string;
+          username?: string;
+          displayName?: string;
+          status: string; 
+          lastSeen: string 
+        }) => {
+          console.log('User status updated:', data);
           setConversations(prev => 
             prev.map(conv => ({
               ...conv,
               otherUser: conv.otherUser.id === data.userId 
-                ? { ...conv.otherUser, status: data.status as any, lastSeen: data.lastSeen }
+                ? { 
+                    ...conv.otherUser, 
+                    status: data.status as any, 
+                    lastSeen: data.lastSeen,
+                    username: data.username || conv.otherUser.username,
+                    displayName: data.displayName || conv.otherUser.displayName
+                  }
                 : conv.otherUser
             }))
           );
+
+          // Also update selectedConversation if it's the same user
+          setSelectedConversation(prev => {
+            if (prev && prev.otherUser.id === data.userId) {
+              return {
+                ...prev,
+                otherUser: {
+                  ...prev.otherUser,
+                  status: data.status as any,
+                  lastSeen: data.lastSeen,
+                  username: data.username || prev.otherUser.username,
+                  displayName: data.displayName || prev.otherUser.displayName
+                }
+              };
+            }
+            return prev;
+          });
         });
 
 
@@ -390,6 +425,7 @@ export default function ChatPage() {
     const heartbeatInterval = setInterval(() => {
       if (socket && user && !document.hidden) {
         socket.emit('join', user.uid);
+        socket.emit('heartbeat'); // Send heartbeat to keep connection alive
       }
     }, 30000);
 
@@ -632,68 +668,157 @@ export default function ChatPage() {
     }
   };
 
+  // Calculate MD5 hash of file content using Web Crypto API
+  const calculateFileHash = async (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const arrayBuffer = e.target?.result as ArrayBuffer;
+          
+          // Use Web Crypto API to calculate SHA-256 hash
+          const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+          
+          resolve(hashHex);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  };
+
   const uploadMedia = async (file: File) => {
     if (!selectedConversation) return;
 
-    
     try {
       const token = await user?.getIdToken();
       
-      // Get upload URL
-      const uploadResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/upload-url/${selectedConversation.id}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileType: file.type,
-        }),
-      });
-      
-      if (!uploadResponse.ok) {
-        const errorText = await uploadResponse.text();
-        console.error('Upload URL error response:', errorText);
-        throw new Error(`Upload URL failed: ${uploadResponse.status} - ${errorText}`);
+      // Step 1: Calculate content hash
+      console.log('Calculating file hash...');
+      const contentHash = await calculateFileHash(file);
+      console.log('File hash:', contentHash);
+
+      // Step 2: Check for duplicates
+      console.log('Checking for duplicates...');
+      const duplicateCheckResponse = await fetch(
+        `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/check-duplicate/${selectedConversation.id}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            contentHash,
+            fileName: file.name,
+            fileType: file.type,
+          }),
+        }
+      );
+
+      if (!duplicateCheckResponse.ok) {
+        throw new Error('Failed to check for duplicates');
       }
-      
-      const { uploadUrl, mediaId } = await uploadResponse.json();
-      
-      // Upload file to S3
-      const s3Response = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type },
-        body: file,
-      });
-      
-      if (!s3Response.ok) {
-        console.error('S3 upload failed:', s3Response.status, s3Response.statusText);
-        throw new Error(`S3 upload failed: ${s3Response.status}`);
+
+      const duplicateCheck = await duplicateCheckResponse.json();
+
+      let mediaId: string;
+
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingMedia) {
+        // Step 3a: File is duplicate, create new media record pointing to existing S3 file
+        console.log('File is duplicate, creating new media record...');
+        const duplicateResponse = await fetch(
+          `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/create-duplicate-media/${selectedConversation.id}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              existingMediaId: duplicateCheck.existingMedia.id,
+              fileName: file.name,
+              fileType: file.type,
+            }),
+          }
+        );
+
+        if (!duplicateResponse.ok) {
+          throw new Error('Failed to create duplicate media record');
+        }
+
+        const duplicateResult = await duplicateResponse.json();
+        mediaId = duplicateResult.id;
+        console.log('Duplicate file handled:', duplicateResult);
+      } else {
+        // Step 3b: File is not duplicate, get presigned URL and upload
+        console.log('File is unique, getting presigned URL...');
+        const uploadResponse = await fetch(
+          `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/upload-url/${selectedConversation.id}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              fileName: file.name,
+              fileType: file.type,
+              contentHash,
+            }),
+          }
+        );
+
+        if (!uploadResponse.ok) {
+          const errorText = await uploadResponse.text();
+          console.error('Upload URL error response:', errorText);
+          throw new Error(`Upload URL failed: ${uploadResponse.status} - ${errorText}`);
+        }
+
+        const { uploadUrl, mediaId: newMediaId } = await uploadResponse.json();
+        mediaId = newMediaId;
+        console.log('Got presigned URL:', { uploadUrl, mediaId });
+
+        // Step 4: Upload file to S3
+        console.log('Uploading file to S3...');
+        const s3Response = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type },
+          body: file,
+        });
+
+        if (!s3Response.ok) {
+          console.error('S3 upload failed:', s3Response.status, s3Response.statusText);
+          throw new Error(`S3 upload failed: ${s3Response.status}`);
+        }
+
+        // Step 5: Confirm upload and update media record
+        console.log('Confirming upload...');
+        const confirmResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            mediaId,
+            fileSize: file.size,
+          }),
+        });
+
+        if (!confirmResponse.ok) {
+          const errorText = await confirmResponse.text();
+          console.error('Confirm upload error response:', errorText);
+          throw new Error(`Confirm upload failed: ${confirmResponse.status} - ${errorText}`);
+        }
       }
-      
-      
-      // Confirm upload
-      const confirmResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          mediaId,
-          fileSize: file.size,
-        }),
-      });
-      
-      if (!confirmResponse.ok) {
-        const errorText = await confirmResponse.text();
-        console.error('Confirm upload error response:', errorText);
-        throw new Error(`Confirm upload failed: ${confirmResponse.status} - ${errorText}`);
-      }
-      
-      // Send message with media
-      
+
+      // Step 6: Send message with media
+      console.log('Creating message with media...');
       const messageResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages`, {
         method: 'POST',
         headers: {
@@ -706,16 +831,17 @@ export default function ChatPage() {
           mediaIds: [mediaId],
         }),
       });
-      
+
       if (!messageResponse.ok) {
         const errorText = await messageResponse.text();
         console.error('Message creation error response:', errorText);
         throw new Error(`Message creation failed: ${messageResponse.status} - ${errorText}`);
       }
-      
+
       if (messageResponse.ok) {
         setSelectedFile(null);
         setPreviewUrl(null);
+        console.log('Media upload completed successfully');
       }
     } catch (error) {
       console.error('=== MEDIA UPLOAD FAILED ===', error);
@@ -938,6 +1064,7 @@ export default function ChatPage() {
             isConnected={isConnected}
             onSignOut={handleSignOut}
             typingUsers={typingUsers}
+            currentUser={currentUserProfile}
           />
         </Suspense>
 

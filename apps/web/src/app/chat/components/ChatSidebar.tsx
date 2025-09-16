@@ -17,6 +17,7 @@ interface ChatSidebarProps {
   isConnected: boolean;
   onSignOut: () => void;
   typingUsers: {[conversationId: string]: {username: string, displayName: string}};
+  currentUser: User | null;
 }
 
 export default function ChatSidebar({
@@ -32,7 +33,8 @@ export default function ChatSidebar({
   onCreateConversation,
   isConnected,
   onSignOut,
-  typingUsers
+  typingUsers,
+  currentUser
 }: ChatSidebarProps) {
   const formatTime = (timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -57,6 +59,27 @@ export default function ChatSidebar({
             </button>
           </div>
         </div>
+        
+        {/* Current User Info */}
+        {currentUser && (
+          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center">
+                {currentUser.avatar ? (
+                  <img src={currentUser.avatar} alt={currentUser.displayName} className="w-10 h-10 rounded-full" />
+                ) : (
+                  <span className="text-white font-semibold text-lg">
+                    {currentUser.displayName.charAt(0).toUpperCase()}
+                  </span>
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-blue-800 truncate">@{currentUser.username}</p>
+                <p className="text-sm text-blue-600 truncate">{currentUser.displayName}</p>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="mt-4">
           <div className="flex space-x-2">
             <input

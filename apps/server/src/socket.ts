@@ -1,7 +1,88 @@
 import type { Server as SocketIOServer } from 'socket.io';
 import { prisma } from './lib/prisma';
 
+// Track active connections for timeout-based offline detection
+const activeConnections = new Map<string, { socketId: string, lastSeen: Date }>();
+
 let ioInstance: SocketIOServer | null = null;
+
+// Periodic cleanup to mark stale users as offline (every 2 minutes)
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const staleThreshold = 2 * 60 * 1000; // 2 minutes in milliseconds
+    const staleUsers: string[] = [];
+
+    console.log(`[CLEANUP] Checking ${activeConnections.size} active connections...`);
+
+    // Find stale connections
+    for (const [userId, connection] of activeConnections.entries()) {
+      const timeSinceLastSeen = now.getTime() - connection.lastSeen.getTime();
+      console.log(`[CLEANUP] User ${userId}: last seen ${Math.round(timeSinceLastSeen / 1000)}s ago`);
+      
+      if (timeSinceLastSeen > staleThreshold) {
+        staleUsers.push(userId);
+      }
+    }
+
+    if (staleUsers.length > 0) {
+      console.log(`[CLEANUP] Found ${staleUsers.length} stale users:`, staleUsers);
+    }
+
+    // Mark stale users as offline
+    for (const userId of staleUsers) {
+      console.log(`[CLEANUP] Marking stale user ${userId} as offline`);
+      
+      // Remove from active connections
+      activeConnections.delete(userId);
+      
+      // Update database
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          status: 'OFFLINE',
+          lastSeen: new Date(),
+        },
+      });
+
+      // Notify friends about offline status
+      const conversations = await prisma.conversation.findMany({
+        where: {
+          OR: [
+            { user1Id: userId },
+            { user2Id: userId }
+          ]
+        },
+        include: {
+          user1: { select: { id: true, firebaseUid: true } },
+          user2: { select: { id: true, firebaseUid: true } }
+        }
+      });
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { displayName: true, username: true, firebaseUid: true },
+      });
+
+      for (const conv of conversations) {
+        const friendFirebaseUid = conv.user1Id === userId ? conv.user2.firebaseUid : conv.user1.firebaseUid;
+        
+        if (ioInstance) {
+          ioInstance.to(`user:${friendFirebaseUid}`).emit('user-status-updated', {
+            userId: userId,
+            firebaseUid: user?.firebaseUid,
+            username: user?.username,
+            displayName: user?.displayName,
+            status: 'OFFLINE',
+            lastSeen: new Date()
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Stale user cleanup error:', error);
+  }
+}, 2 * 60 * 1000); // Run every 2 minutes
 
 export function setSocketServer(io: SocketIOServer) {
   ioInstance = io;
@@ -14,8 +95,79 @@ export function getSocketServer(): SocketIOServer {
   return ioInstance;
 }
 
+// Manual cleanup function to force mark all users offline
+export async function forceCleanupAllUsers() {
+  try {
+    console.log('[FORCE CLEANUP] Starting manual cleanup of all users...');
+    
+    // Get all users currently marked as online
+    const onlineUsers = await prisma.user.findMany({
+      where: { status: 'ONLINE' },
+      select: { id: true, displayName: true, username: true, firebaseUid: true }
+    });
+
+    console.log(`[FORCE CLEANUP] Found ${onlineUsers.length} users marked as online`);
+
+    for (const user of onlineUsers) {
+      // Check if user is actually connected
+      const isConnected = activeConnections.has(user.id);
+      
+      if (!isConnected) {
+        console.log(`[FORCE CLEANUP] User ${user.displayName} (${user.id}) is not connected, marking offline`);
+        
+        // Mark as offline
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            status: 'OFFLINE',
+            lastSeen: new Date(),
+          },
+        });
+
+        // Notify friends
+        const conversations = await prisma.conversation.findMany({
+          where: {
+            OR: [
+              { user1Id: user.id },
+              { user2Id: user.id }
+            ]
+          },
+          include: {
+            user1: { select: { id: true, firebaseUid: true } },
+            user2: { select: { id: true, firebaseUid: true } }
+          }
+        });
+
+        for (const conv of conversations) {
+          const friendFirebaseUid = conv.user1Id === user.id ? conv.user2.firebaseUid : conv.user1.firebaseUid;
+          
+          if (ioInstance) {
+            ioInstance.to(`user:${friendFirebaseUid}`).emit('user-status-updated', {
+              userId: user.id,
+              firebaseUid: user.firebaseUid,
+              username: user.username,
+              displayName: user.displayName,
+              status: 'OFFLINE',
+              lastSeen: new Date()
+            });
+          }
+        }
+      } else {
+        console.log(`[FORCE CLEANUP] User ${user.displayName} (${user.id}) is actually connected, keeping online`);
+      }
+    }
+
+    console.log('[FORCE CLEANUP] Manual cleanup completed');
+  } catch (error) {
+    console.error('[FORCE CLEANUP] Error during manual cleanup:', error);
+  }
+}
+
 // Socket event handlers for real-time chat
 export function setupSocketHandlers(io: SocketIOServer) {
+  // Run cleanup immediately when server starts
+  console.log('[STARTUP] Running initial user cleanup...');
+  forceCleanupAllUsers();
   io.on('connection', async (socket) => {
     // Don't log anonymous connections - only log when they authenticate
 
@@ -33,6 +185,12 @@ export function setupSocketHandlers(io: SocketIOServer) {
           socket.join(user.id);
           socket.join(`user:${user.id}`);
           socket.join(`user:${userId}`); // Join Firebase UID room for conversation updates
+          
+          // Track this connection for timeout detection
+          activeConnections.set(user.id, {
+            socketId: socket.id,
+            lastSeen: new Date()
+          });
           
           // Update user status to online
           await prisma.user.update({
@@ -435,6 +593,14 @@ export function setupSocketHandlers(io: SocketIOServer) {
           },
         });
 
+        // Update connection tracking
+        if (activeConnections.has(socket.data.userId)) {
+          activeConnections.set(socket.data.userId, {
+            socketId: socket.id,
+            lastSeen: new Date()
+          });
+        }
+
         // Emit status update to all user's conversations
         const conversations = await prisma.conversation.findMany({
           where: {
@@ -458,10 +624,23 @@ export function setupSocketHandlers(io: SocketIOServer) {
       }
     });
 
+    // Handle heartbeat to keep connection alive
+    socket.on('heartbeat', () => {
+      if (socket.data.userId && activeConnections.has(socket.data.userId)) {
+        activeConnections.set(socket.data.userId, {
+          socketId: socket.id,
+          lastSeen: new Date()
+        });
+      }
+    });
+
     // Handle disconnection
     socket.on('disconnect', async () => {
       try {
         if (socket.data.userId) {
+          // Remove from active connections
+          activeConnections.delete(socket.data.userId);
+          
           // Update user status to offline
           await prisma.user.update({
             where: { id: socket.data.userId },
@@ -485,25 +664,29 @@ export function setupSocketHandlers(io: SocketIOServer) {
             }
           });
 
+          // Get user info for notifications
+          const user = await prisma.user.findUnique({
+            where: { id: socket.data.userId },
+            select: { displayName: true, username: true },
+          });
+
           // Notify each friend about the offline status
           for (const conv of conversations) {
             const friendId = conv.user1Id === socket.data.userId ? conv.user2.id : conv.user1.id;
             const friendFirebaseUid = conv.user1Id === socket.data.userId ? conv.user2.firebaseUid : conv.user1.firebaseUid;
             
-            // Emit to the friend's Firebase UID room
+            // Emit to the friend's Firebase UID room with complete user info
             io.to(`user:${friendFirebaseUid}`).emit('user-status-updated', {
               userId: socket.data.userId,
               firebaseUid: socket.data.firebaseUid,
+              username: user?.username,
+              displayName: user?.displayName,
               status: 'OFFLINE',
               lastSeen: new Date()
             });
           }
 
-          // Get user info for better logging
-          const user = await prisma.user.findUnique({
-            where: { id: socket.data.userId },
-            select: { displayName: true, username: true },
-          });
+          console.log(`User ${user?.displayName || socket.data.userId} disconnected and marked offline`);
           
         }
       } catch (error) {
