@@ -6,8 +6,7 @@ import {
   signInWithEmailAndPassword, 
   signOut,
   signInWithPopup,
-  GoogleAuthProvider,
-  FacebookAuthProvider
+  GoogleAuthProvider
 } from 'firebase/auth';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../lib/firebase';
@@ -18,8 +17,6 @@ export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [username, setUsername] = useState('');
   const [formLoading, setFormLoading] = useState(false);
   const [formError, setFormError] = useState('');
   const router = useRouter();
@@ -63,7 +60,7 @@ export default function AuthPage() {
     
     switch (errorCode) {
       case 'auth/operation-not-allowed':
-        return 'Google and Facebook login are not enabled. Please use email and password instead.';
+        return 'Email registration is not enabled. Please contact support.';
       case 'auth/popup-closed-by-user':
         return 'Login was cancelled. Please try again.';
       case 'auth/popup-blocked':
@@ -81,11 +78,15 @@ export default function AuthPage() {
       case 'auth/email-already-in-use':
         return 'An account with this email already exists. Please sign in instead.';
       case 'auth/weak-password':
-        return 'Password is too weak. Please choose a stronger password.';
+        return 'Password is too weak. Please choose a stronger password (at least 6 characters).';
       case 'auth/invalid-email':
         return 'Please enter a valid email address.';
+      case 'auth/missing-password':
+        return 'Please enter a password.';
+      case 'auth/invalid-credential':
+        return 'Invalid email or password. Please check your credentials and try again.';
       default:
-        return 'An unexpected error occurred. Please try again or use email and password.';
+        return 'An unexpected error occurred. Please try again.';
     }
   };
 
@@ -130,36 +131,6 @@ export default function AuthPage() {
     }
   };
 
-  const handleFacebookSignIn = async () => {
-    try {
-      setFormLoading(true);
-      setFormError('');
-      
-      const provider = new FacebookAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-      
-      // Check if user already has a profile
-      const token = await user.getIdToken();
-      const profileResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-
-      if (profileResponse.ok) {
-        // User already has a profile, go to chat
-        window.location.href = '/chat';
-      } else {
-        // User needs to set username, go to username page
-        window.location.href = '/username';
-      }
-    } catch (error: any) {
-      setFormError(getErrorMessage(error));
-    } finally {
-      setFormLoading(false);
-    }
-  };
 
   // Helper function to create user profile
   const createUserProfile = async (user: any) => {
@@ -189,8 +160,10 @@ export default function AuthPage() {
     try {
       if (isLogin) {
         // Login
+        console.log('Attempting login with:', email);
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
+        console.log('Login successful:', user.uid);
         
         // Check if user has profile
         const token = await user.getIdToken();
@@ -202,25 +175,26 @@ export default function AuthPage() {
 
         if (profileResponse.ok) {
           // User has profile, go to chat
+          console.log('User has profile, redirecting to chat');
           router.push('/chat');
         } else {
           // User needs to set username, go to username page
+          console.log('No profile found, redirecting to username');
           router.push('/username');
         }
       } else {
         // Signup - always go to username page for new users
+        console.log('Attempting signup with:', { email });
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
-        
-        // Update display name
-        await user.updateProfile({
-          displayName: displayName
-        });
+        console.log('Signup successful:', user.uid);
 
         // Always redirect new users to username page
+        console.log('Redirecting new user to username page');
         router.push('/username');
       }
     } catch (error: any) {
+      console.error('Auth error:', error);
       setFormError(getErrorMessage(error));
     } finally {
       setFormLoading(false);
@@ -264,40 +238,6 @@ export default function AuthPage() {
         
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="rounded-md shadow-sm -space-y-px">
-            {!isLogin && (
-              <>
-                <div>
-                  <label htmlFor="displayName" className="sr-only">
-                    Display Name
-                  </label>
-                  <input
-                    id="displayName"
-                    name="displayName"
-                    type="text"
-                    required={!isLogin}
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
-                    placeholder="Display Name"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="username" className="sr-only">
-                    Username
-                  </label>
-                  <input
-                    id="username"
-                    name="username"
-                    type="text"
-                    required={!isLogin}
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
-                    placeholder="Username"
-                  />
-                </div>
-              </>
-            )}
             <div>
               <label htmlFor="email" className="sr-only">
                 Email address
@@ -310,7 +250,7 @@ export default function AuthPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
+                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
                 placeholder="Email address"
               />
             </div>
@@ -360,7 +300,7 @@ export default function AuthPage() {
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-2 gap-3">
+          <div className="mt-6">
             <button
               onClick={handleGoogleSignIn}
               disabled={formLoading || loading}
@@ -373,17 +313,6 @@ export default function AuthPage() {
                 <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
               </svg>
               <span className="ml-2">Google</span>
-            </button>
-
-            <button
-              onClick={handleFacebookSignIn}
-              disabled={formLoading || loading}
-              className="w-full inline-flex justify-center py-2 px-4 border border-gray-300 rounded-md shadow-sm bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:bg-gray-100 disabled:cursor-not-allowed"
-            >
-              <svg className="w-5 h-5" fill="#1877F2" viewBox="0 0 24 24">
-                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
-              </svg>
-              <span className="ml-2">Facebook</span>
             </button>
           </div>
         </div>

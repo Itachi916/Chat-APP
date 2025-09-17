@@ -65,7 +65,7 @@ const MediaImage = memo(({ media, getMediaViewUrl, onImageClick }: {
         className="max-w-full h-auto rounded-lg cursor-pointer"
         onClick={() => onImageClick(imageUrl, media.fileName)}
       />
-      <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all duration-200 rounded-lg flex items-center justify-center">
+      <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all duration-200 rounded-lg flex items-center justify-center pointer-events-none">
         <span className="text-white opacity-0 group-hover:opacity-100 text-sm">Click to view</span>
       </div>
     </div>

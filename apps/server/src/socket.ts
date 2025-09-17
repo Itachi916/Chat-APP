@@ -1,5 +1,6 @@
 import type { Server as SocketIOServer } from 'socket.io';
 import { prisma } from './lib/prisma';
+import { moderateMessage, extractPhoneNumbers } from './moderation';
 
 // Track active connections for timeout-based offline detection
 const activeConnections = new Map<string, { socketId: string, lastSeen: Date }>();
@@ -334,6 +335,29 @@ export function setupSocketHandlers(io: SocketIOServer) {
         }
 
         const { conversationId, content, messageType, mediaIds, replyToId } = data;
+
+        // Moderate text content for phone numbers
+        if (content && messageType === 'TEXT') {
+          const moderationResult = moderateMessage(content);
+          
+          if (moderationResult.isBlocked) {
+            // Log the attempt for monitoring
+            const detectedNumbers = extractPhoneNumbers(content);
+            console.log(`[MODERATION] Phone number blocked from user ${socket.data.userId}:`, {
+              detectedNumbers,
+              reason: moderationResult.reason,
+              content: content.substring(0, 100) + (content.length > 100 ? '...' : '')
+            });
+            
+            // Send error back to client
+            socket.emit('message-blocked', {
+              reason: moderationResult.reason,
+              message: 'Your message contains a phone number which is not allowed.',
+              detectedPattern: moderationResult.detectedPattern
+            });
+            return;
+          }
+        }
 
         // Verify user is part of the conversation
         const conversation = await prisma.conversation.findFirst({

@@ -40,8 +40,8 @@ export default function ChatPage() {
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [showSearch, setShowSearch] = useState(false);
   const [currentUserProfile, setCurrentUserProfile] = useState<User | null>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const selectedConversationRef = useRef<Conversation | null>(null);
   const messageIdsRef = useRef<Set<string>>(new Set());
@@ -69,38 +69,7 @@ export default function ChatPage() {
     }
   }, [socket, router]);
 
-  // Scroll to bottom when new messages arrive
-  const scrollToBottom = () => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ 
-        behavior: 'smooth',
-        block: 'end',
-        inline: 'nearest'
-      });
-    }
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  // Scroll to bottom when conversation changes
-  useEffect(() => {
-    if (selectedConversation) {
-      // Multiple attempts to ensure scroll works with media loading
-      setTimeout(() => {
-        scrollToBottom();
-      }, 100);
-      
-      setTimeout(() => {
-        scrollToBottom();
-      }, 300);
-      
-      setTimeout(() => {
-        scrollToBottom();
-      }, 500);
-    }
-  }, [selectedConversation]);
+  // Auto-scroll is now handled in MessageList component
 
   // Handle ESC key to close image viewer
   useEffect(() => {
@@ -220,6 +189,21 @@ export default function ChatPage() {
               return [...prev, message];
             });
           }
+        });
+
+        // Listen for blocked messages
+        socketInstance.on('message-blocked', (data: { 
+          reason: string; 
+          message: string; 
+          detectedPattern: string; 
+        }) => {
+          console.warn('Message blocked:', data);
+          
+          // Show user-friendly error message
+          alert(`Message blocked: ${data.message}`);
+          
+          // You could also show a toast notification here instead of alert
+          // For example: showToast('error', data.message);
         });
 
         // Listen for conversation updates
@@ -392,6 +376,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (selectedConversation && socket) {
       selectedConversationRef.current = selectedConversation; // Update ref
+      setIsInitialLoad(true); // Set initial load flag for new conversation
       loadMessages();
       socket.emit('join-conversation', selectedConversation.id);
       
@@ -402,7 +387,22 @@ export default function ChatPage() {
     }
   }, [selectedConversation, socket]);
 
-  // Auto-scroll is now handled in MessageList component
+  // Set isInitialLoad to false after messages are loaded and scrolled
+  useEffect(() => {
+    if (messages.length > 0 && isInitialLoad) {
+      console.log('Setting isInitialLoad to false after messages loaded:', messages.length);
+      // Give more time for the scroll to complete
+      const timer = setTimeout(() => {
+        setIsInitialLoad(false);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [messages.length, isInitialLoad]);
+
+  // Debug isInitialLoad changes
+  useEffect(() => {
+    console.log('isInitialLoad changed:', isInitialLoad);
+  }, [isInitialLoad]);
 
   // Handle visibility change and focus (when user returns to chat)
   useEffect(() => {
@@ -507,11 +507,6 @@ export default function ChatPage() {
       });
       
       setMessages(messages);
-      
-      // Scroll to bottom after messages are loaded
-      setTimeout(() => {
-        scrollToBottom();
-      }, 100);
     } catch (error) {
       console.error('Failed to load messages:', error);
       setMessages([]); // Ensure messages is always an array
@@ -593,8 +588,39 @@ export default function ChatPage() {
     }
   }, [user]);
 
+  // Client-side phone number validation
+  const containsPhoneNumber = useCallback((text: string): boolean => {
+    if (!text || typeof text !== 'string') return false;
+    
+    // More specific phone number patterns that require proper phone number structure
+    const phonePatterns = [
+      // US/Canada formats: (123) 456-7890, 123-456-7890, 123.456.7890
+      /(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b/g,
+      // 10-digit numbers: 1234567890
+      /\b\d{10}\b/g,
+      // International formats with country code: +1 123 456 7890, +44 20 7946 0958
+      /\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}\b/g,
+      // Emergency numbers: 911, 999, 112, 000
+      /\b(911|999|112|000)\b/g,
+      // Toll-free numbers: 1-800-XXX-XXXX
+      /\b1[-.\s]?800[-.\s]?\d{3}[-.\s]?\d{4}\b/gi,
+      // Extension numbers: 123-456-7890 ext 123
+      /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}[-.\s]?(?:ext|extension|x)[-.\s]?\d{1,6}\b/gi,
+      // Disguised patterns with spaces: 1 2 3 4 5 6 7 8 9 0 (10+ digits)
+      /\b\d(?:\s\d){9,}\b/g
+    ];
+    
+    return phonePatterns.some(pattern => pattern.test(text));
+  }, []);
+
   const sendMessage = useCallback(async () => {
     if (!newMessage.trim() || !selectedConversation || !socket) return;
+
+    // Client-side validation for phone numbers
+    if (containsPhoneNumber(newMessage)) {
+      alert('Phone numbers are not allowed in messages. Please remove any phone numbers and try again.');
+      return;
+    }
 
     try {
       // Send message via socket for real-time updates
@@ -613,7 +639,7 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to send message:', error);
     }
-  }, [newMessage, selectedConversation, socket]);
+  }, [newMessage, selectedConversation, socket, containsPhoneNumber]);
 
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!socket) return;
@@ -870,6 +896,7 @@ export default function ChatPage() {
     setViewingImage({url, fileName});
   }, []);
 
+
   // Function to get presigned URL for media viewing
   const getMediaViewUrl = useCallback(async (mediaId: string): Promise<string | null> => {
     try {
@@ -1002,6 +1029,7 @@ export default function ChatPage() {
               formatTime={formatTime}
               getMediaViewUrl={getMediaViewUrl}
               onImageClick={handleImageClick}
+              isInitialLoad={isInitialLoad}
             />
             
             {/* Typing Indicator */}
@@ -1016,7 +1044,7 @@ export default function ChatPage() {
             {/* Image Viewer Modal */}
             {viewingImage && (
               <div 
-                className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4"
+                className="fixed inset-0 bg-black bg-opacity-90 z-[9999] flex items-center justify-center p-4"
                 onClick={() => setViewingImage(null)}
               >
                 <div 
@@ -1109,6 +1137,7 @@ export default function ChatPage() {
               onSendMessage={sendMessage}
               onFileSelect={handleFileSelect}
               onTyping={handleTyping}
+              containsPhoneNumber={containsPhoneNumber}
             />
           </>
         ) : (
