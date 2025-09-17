@@ -41,6 +41,10 @@ export default function ChatPage() {
   const [showSearch, setShowSearch] = useState(false);
   const [currentUserProfile, setCurrentUserProfile] = useState<User | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const selectedConversationRef = useRef<Conversation | null>(null);
@@ -377,6 +381,8 @@ export default function ChatPage() {
     if (selectedConversation && socket) {
       selectedConversationRef.current = selectedConversation; // Update ref
       setIsInitialLoad(true); // Set initial load flag for new conversation
+      setCurrentPage(1); // Reset pagination
+      setHasMoreMessages(false); // Reset pagination state
       loadMessages();
       socket.emit('join-conversation', selectedConversation.id);
       
@@ -473,12 +479,16 @@ export default function ChatPage() {
     }
   };
 
-  const loadMessages = useCallback(async () => {
+  const loadMessages = useCallback(async (page: number = 1, append: boolean = false) => {
     if (!selectedConversation) return;
+    
+    if (!append) {
+      setIsLoadingMessages(true);
+    }
     
     try {
       const token = await user?.getIdToken();
-      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages/conversation/${selectedConversation.id}`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages/conversation/${selectedConversation.id}?page=${page}&limit=50`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -499,19 +509,51 @@ export default function ChatPage() {
       
       const data = await response.json();
       const messages = data.messages || [];
+      const pagination = data.pagination || {};
       
-      // Clear messageIdsRef and populate with loaded messages
-      messageIdsRef.current.clear();
+      // Update pagination state
+      setHasMoreMessages(page < pagination.pages);
+      
+      if (append) {
+        // Prepend older messages to the beginning
+        setMessages(prev => [...messages, ...prev]);
+      } else {
+        // Replace messages (initial load)
+        setMessages(messages);
+        // Clear messageIdsRef and populate with loaded messages
+        messageIdsRef.current.clear();
+        messages.forEach((msg: Message) => {
+          messageIdsRef.current.add(msg.id);
+        });
+      }
+      
+      // Add new message IDs to the ref
       messages.forEach((msg: Message) => {
         messageIdsRef.current.add(msg.id);
       });
       
-      setMessages(messages);
     } catch (error) {
       console.error('Failed to load messages:', error);
-      setMessages([]); // Ensure messages is always an array
+      if (!append) {
+        setMessages([]); // Only clear messages on initial load error
+      }
+    } finally {
+      if (!append) {
+        setIsLoadingMessages(false);
+      }
     }
   }, [selectedConversation, user]);
+
+  const loadMoreMessages = useCallback(async () => {
+    if (!hasMoreMessages || isLoadingMore) return;
+    
+    setIsLoadingMore(true);
+    const nextPage = currentPage + 1;
+    setCurrentPage(nextPage);
+    
+    await loadMessages(nextPage, true);
+    setIsLoadingMore(false);
+  }, [hasMoreMessages, isLoadingMore, currentPage, loadMessages]);
 
   const searchUsers = useCallback(async (query: string) => {
     if (!query.trim()) {
@@ -1022,15 +1064,27 @@ export default function ChatPage() {
             </div>
 
             {/* Messages */}
-            <MessageList
-              messages={messages}
-              currentUserId={user.uid}
-              onDeleteMessage={deleteMessage}
-              formatTime={formatTime}
-              getMediaViewUrl={getMediaViewUrl}
-              onImageClick={handleImageClick}
-              isInitialLoad={isInitialLoad}
-            />
+            {isLoadingMessages ? (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                  <p className="text-gray-600">Loading messages...</p>
+                </div>
+              </div>
+            ) : (
+              <MessageList
+                messages={messages}
+                currentUserId={user.uid}
+                onDeleteMessage={deleteMessage}
+                formatTime={formatTime}
+                getMediaViewUrl={getMediaViewUrl}
+                onImageClick={handleImageClick}
+                isInitialLoad={isInitialLoad}
+                hasMoreMessages={hasMoreMessages}
+                isLoadingMore={isLoadingMore}
+                onLoadMore={loadMoreMessages}
+              />
+            )}
             
             {/* Typing Indicator */}
             {selectedConversation && typingUsers[selectedConversation.id] && (
