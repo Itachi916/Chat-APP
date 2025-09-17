@@ -9,10 +9,12 @@ interface MessageListProps {
   formatTime: (timestamp: string) => string;
   getMediaViewUrl: (mediaId: string) => Promise<string | null>;
   onImageClick: (url: string, fileName: string, mediaId: string) => void;
-  isInitialLoad?: boolean;
   hasMoreMessages?: boolean;
   isLoadingMore?: boolean;
   onLoadMore?: () => void;
+  shouldScrollToBottom?: boolean;
+  onScrollComplete?: () => void;
+  onScrollToBottom?: () => void;
 }
 
 const MessageList = memo(({ 
@@ -22,87 +24,61 @@ const MessageList = memo(({
   formatTime, 
   getMediaViewUrl, 
   onImageClick, 
-  isInitialLoad = false,
   hasMoreMessages = false,
   isLoadingMore = false,
-  onLoadMore
+  onLoadMore,
+  shouldScrollToBottom = false,
+  onScrollComplete,
+  onScrollToBottom
 }: MessageListProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const previousScrollHeightRef = useRef<number>(0);
-  const isScrollingToBottomRef = useRef<boolean>(false);
 
-  // Auto-scroll to bottom when messages change
+  // SIMPLE: Only scroll when explicitly told to
   useEffect(() => {
-    if (messages.length > 0 && messagesEndRef.current && containerRef.current) {
-      console.log('MessageList scroll triggered:', { 
-        messageCount: messages.length, 
-        isInitialLoad, 
-        isLoadingMore,
-        hasRef: !!messagesEndRef.current 
-      });
+    if (shouldScrollToBottom && messages.length > 0 && containerRef.current) {
+      console.log('Explicit scroll to bottom requested');
       
-      if (isInitialLoad) {
-        console.log('Initial load - forcing scroll to bottom');
-        isScrollingToBottomRef.current = true;
-        
-        // Force scroll to bottom immediately for initial load
-        const scrollToBottom = () => {
-          if (containerRef.current) {
-            containerRef.current.scrollTop = containerRef.current.scrollHeight;
-          }
-        };
-        
-        // Multiple attempts to ensure scroll happens
-        scrollToBottom();
-        setTimeout(scrollToBottom, 0);
-        setTimeout(scrollToBottom, 10);
-        setTimeout(scrollToBottom, 50);
-        setTimeout(scrollToBottom, 100);
-        setTimeout(scrollToBottom, 200);
-        setTimeout(scrollToBottom, 500);
-        
-        // Reset flag after scrolling
+      // Store current scroll position before loading more messages
+      if (isLoadingMore && containerRef.current) {
+        previousScrollHeightRef.current = containerRef.current.scrollHeight;
+      }
+      
+      // Scroll to bottom
+      const scrollToBottom = () => {
+        if (containerRef.current) {
+          containerRef.current.scrollTop = containerRef.current.scrollHeight;
+        }
+      };
+      
+      // Multiple attempts to ensure scroll happens
+      scrollToBottom();
+      setTimeout(scrollToBottom, 50);
+      setTimeout(scrollToBottom, 100);
+      setTimeout(scrollToBottom, 200);
+      
+      // Notify parent that scroll is complete
+      if (onScrollComplete) {
         setTimeout(() => {
-          isScrollingToBottomRef.current = false;
-        }, 1000);
-        
-      } else if (isLoadingMore) {
-        console.log('Loading more messages - preserving scroll position');
-        // Store the current scroll position before new messages are added
-        if (containerRef.current) {
-          previousScrollHeightRef.current = containerRef.current.scrollHeight;
-        }
-        
-      } else if (!isLoadingMore && previousScrollHeightRef.current > 0) {
-        console.log('Restoring scroll position after loading more messages');
-        // Calculate the difference in height and adjust scroll position
-        if (containerRef.current) {
-          const heightDifference = containerRef.current.scrollHeight - previousScrollHeightRef.current;
-          containerRef.current.scrollTop = containerRef.current.scrollTop + heightDifference;
-          previousScrollHeightRef.current = 0; // Reset
-        }
-        
-      } else {
-        // This is a new message, scroll to bottom
-        console.log('New message - scrolling to bottom');
-        if (!isScrollingToBottomRef.current) {
-          const timeoutId = setTimeout(() => {
-            messagesEndRef.current?.scrollIntoView({ 
-              behavior: 'smooth',
-              block: 'end',
-              inline: 'nearest'
-            });
-          }, 50);
-          return () => clearTimeout(timeoutId);
-        }
+          onScrollComplete();
+        }, 300);
       }
     }
-  }, [messages, isInitialLoad, isLoadingMore]);
+  }, [shouldScrollToBottom, messages.length, isLoadingMore, onScrollComplete]);
 
+  // Handle loading more messages - preserve scroll position
+  useEffect(() => {
+    if (isLoadingMore && previousScrollHeightRef.current > 0 && containerRef.current) {
+      console.log('Restoring scroll position after loading more messages');
+      const heightDifference = containerRef.current.scrollHeight - previousScrollHeightRef.current;
+      containerRef.current.scrollTop = containerRef.current.scrollTop + heightDifference;
+      previousScrollHeightRef.current = 0;
+    }
+  }, [isLoadingMore]);
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-4 h-0">
+    <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-4 h-0 relative">
       {/* Load Previous Messages Button */}
       {hasMoreMessages && onLoadMore && (
         <div className="flex justify-center py-2">
@@ -138,6 +114,18 @@ const MessageList = memo(({
         );
       })}
       <div ref={messagesEndRef} />
+      
+      {/* Simple scroll to bottom button */}
+      {onScrollToBottom && (
+        <div className="flex justify-center py-2">
+          <button
+            onClick={onScrollToBottom}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm"
+          >
+            Scroll to Bottom
+          </button>
+        </div>
+      )}
     </div>
   );
 });

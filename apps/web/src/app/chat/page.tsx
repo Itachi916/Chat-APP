@@ -42,12 +42,46 @@ export default function ChatPage() {
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [showSearch, setShowSearch] = useState(false);
   const [currentUserProfile, setCurrentUserProfile] = useState<User | null>(null);
-  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [shouldScrollToBottom, setShouldScrollToBottom] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [totalLoadedMessages, setTotalLoadedMessages] = useState(0);
+
+  // Cache to prevent duplicate user status events
+  const userStatusEventCache = useRef<Set<string>>(new Set());
+
+  // DEBUG: Track component re-renders
+  console.log('🔄 ChatPage re-rendered at:', new Date().toISOString());
+  console.log('🔄 Current state:', {
+    conversationsCount: conversations.length,
+    messagesCount: messages.length,
+    selectedConversationId: selectedConversation?.id,
+    isConnected,
+    viewingImage: !!viewingImage
+  });
+
+  // DEBUG: Track state changes
+  useEffect(() => {
+    console.log('📊 Conversations changed:', conversations.length);
+  }, [conversations]);
+
+  useEffect(() => {
+    console.log('📊 Messages changed:', messages.length);
+  }, [messages]);
+
+  useEffect(() => {
+    console.log('📊 Selected conversation changed:', selectedConversation?.id);
+  }, [selectedConversation]);
+
+  useEffect(() => {
+    console.log('📊 Connection status changed:', isConnected);
+  }, [isConnected]);
+
+  useEffect(() => {
+    console.log('📊 Viewing image changed:', !!viewingImage);
+  }, [viewingImage]);
   const [videoUploadProgress, setVideoUploadProgress] = useState<{
     isUploading: boolean;
     progress: number;
@@ -89,7 +123,7 @@ export default function ChatPage() {
 
   // Auto-scroll is now handled in MessageList component
 
-  // Handle ESC key to close image viewer
+  // Handle ESC key to close image viewer and prevent body scroll
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && viewingImage) {
@@ -98,8 +132,13 @@ export default function ChatPage() {
     };
 
     if (viewingImage) {
+      // Prevent body scroll when image viewer is open
+      document.body.style.overflow = 'hidden';
       document.addEventListener('keydown', handleKeyDown);
-      return () => document.removeEventListener('keydown', handleKeyDown);
+      return () => {
+        document.body.style.overflow = 'unset';
+        document.removeEventListener('keydown', handleKeyDown);
+      };
     }
   }, [viewingImage]);
 
@@ -144,9 +183,12 @@ export default function ChatPage() {
 
   // Initialize socket connection and set up listeners
   useEffect(() => {
+    console.log('🔌 Socket useEffect running, user:', !!user, 'socket:', !!socket);
     if (user && !socket) {
       const initSocket = async () => {
+        console.log('🔌 Creating socket instance via getSocket()');
         const socketInstance = await getSocket();
+        console.log('🔌 Socket instance created:', socketInstance);
         
         setSocket(socketInstance);
         
@@ -158,11 +200,13 @@ export default function ChatPage() {
         }
         
         socketInstance.on('connect', () => {
+          console.log('🔌 Socket connected');
           setIsConnected(true);
           socketInstance.emit('join', user.uid);
         });
 
         socketInstance.on('disconnect', () => {
+          console.log('🔌 Socket disconnected');
           setIsConnected(false);
         });
 
@@ -179,9 +223,17 @@ export default function ChatPage() {
 
           // Only update conversations if not current conversation or not own message
           if (!isCurrentConversation || !isOwnMessage) {
+            console.log('📝 Updating conversations for new message:', message.id);
             setConversations(prev => {
               const updated = prev.map(conv => {
                 if (conv.id === message.conversationId) {
+                  // Check if the last message actually changed to prevent unnecessary re-renders
+                  if (conv.lastMessage?.id === message.id) {
+                    console.log('🔄 Last message unchanged, skipping conversation update');
+                    return conv; // No change, return same object
+                  }
+                  
+                  console.log('🔄 Last message changed, updating conversation');
                   return {
                     ...conv,
                     lastMessage: message,
@@ -194,6 +246,8 @@ export default function ChatPage() {
               });
               return updated;
             });
+          } else {
+            console.log('📝 Skipping conversation update - current conversation or own message');
           }
           
           // Only add message to current messages if it belongs to the currently selected conversation
@@ -206,6 +260,10 @@ export default function ChatPage() {
               }
               return [...prev, message];
             });
+            
+            // ULTRA-SIMPLE: Trigger scroll for new message
+            console.log('New message received - triggering scroll');
+            triggerScrollForNewMessage();
           }
         });
 
@@ -224,14 +282,23 @@ export default function ChatPage() {
           // For example: showToast('error', data.message);
         });
 
-        // Listen for conversation updates
+        // Listen for conversation updates - OPTIMIZED to prevent unnecessary re-renders
         socketInstance.on('conversation-updated', (data: any) => {
+          console.log('🔔 Conversation updated event received:', data);
           setConversations(prev => 
-            prev.map(conv => 
-              conv.id === data.conversationId 
-                ? { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt }
-                : conv
-            )
+            prev.map(conv => {
+              if (conv.id === data.conversationId) {
+                // Check if the last message actually changed to prevent unnecessary re-renders
+                if (conv.lastMessage?.id === data.lastMessage?.id) {
+                  console.log('🔄 No change in last message, skipping re-render');
+                  return conv; // No change, return same object to prevent re-render
+                }
+                
+                console.log('🔄 Last message changed, updating conversation');
+                return { ...conv, lastMessage: data.lastMessage, lastMessageAt: data.lastMessageAt };
+              }
+              return conv;
+            })
           );
         });
 
@@ -285,17 +352,32 @@ export default function ChatPage() {
           isTyping: boolean; 
           conversationId: string 
         }) => {
+          console.log('⌨️ Typing event received:', data);
           
           // Update typing users state
           setTypingUsers(prev => {
             const newTypingUsers = { ...prev };
             
             if (data.isTyping) {
+              // Check if typing state actually changed
+              if (newTypingUsers[data.conversationId]?.username === data.username) {
+                console.log('⌨️ Typing state unchanged, skipping update');
+                return prev; // No change, return same object
+              }
+              
+              console.log('⌨️ Adding typing user:', data.username);
               newTypingUsers[data.conversationId] = {
                 username: data.username,
                 displayName: data.displayName
               };
             } else {
+              // Check if user was actually typing
+              if (!newTypingUsers[data.conversationId]) {
+                console.log('⌨️ User was not typing, skipping update');
+                return prev; // No change, return same object
+              }
+              
+              console.log('⌨️ Removing typing user:', data.username);
               delete newTypingUsers[data.conversationId];
             }
             
@@ -306,34 +388,77 @@ export default function ChatPage() {
           // The conversation preview should remain unchanged to preserve unread count
         });
 
-        // Listen for user status updates
-        socketInstance.on('user-status-updated', (data: { 
-          userId: string; 
-          firebaseUid?: string;
-          username?: string;
-          displayName?: string;
-          status: string; 
-          lastSeen: string 
-        }) => {
-          console.log('User status updated:', data);
+        // Listen for user status updates - OPTIMIZED to prevent unnecessary re-renders
+        if (!socketInstance._userStatusHandlerAttached) {
+          console.log('🔌 Attaching user-status-updated handler');
+          socketInstance._userStatusHandlerAttached = true;
+          
+          socketInstance.on('user-status-updated', (data: { 
+            userId: string; 
+            firebaseUid?: string;
+            username?: string;
+            displayName?: string;
+            status: string; 
+            lastSeen: string 
+          }) => {
+          console.log('🔔 User status updated event received:', data);
+          
+          // AGGRESSIVE OPTIMIZATION: Check if this is a duplicate event
+          const eventKey = `${data.userId}-${data.status}-${data.lastSeen || 'no-lastseen'}`;
+          console.log('🔍 Event key:', eventKey);
+          console.log('🔍 Cache contents:', Array.from(userStatusEventCache.current));
+          
+          if (userStatusEventCache.current.has(eventKey)) {
+            console.log('🔄 Duplicate user status event, skipping completely');
+            return;
+          }
+          
+          console.log('🔄 New user status event, adding to cache');
+          userStatusEventCache.current.add(eventKey);
+          
+          // Clear cache after 5 seconds to allow legitimate status changes
+          setTimeout(() => {
+            userStatusEventCache.current.delete(eventKey);
+            console.log('🔄 Removed event from cache:', eventKey);
+          }, 5000);
+          
+          // Only update if the status actually changed to prevent unnecessary re-renders
           setConversations(prev => 
-            prev.map(conv => ({
-              ...conv,
-              otherUser: conv.otherUser.id === data.userId 
-                ? { 
+            prev.map(conv => {
+              if (conv.otherUser.id === data.userId) {
+                // Check if status actually changed
+                if (conv.otherUser.status === data.status) {
+                  console.log('🔄 User status unchanged, skipping conversation update');
+                  return conv; // No change, return same object to prevent re-render
+                }
+                
+                console.log('🔄 User status changed, updating conversation');
+                
+                return {
+                  ...conv,
+                  otherUser: { 
                     ...conv.otherUser, 
                     status: data.status as any, 
                     lastSeen: data.lastSeen,
                     username: data.username || conv.otherUser.username,
                     displayName: data.displayName || conv.otherUser.displayName
                   }
-                : conv.otherUser
-            }))
+                };
+              }
+              return conv;
+            })
           );
 
           // Also update selectedConversation if it's the same user
           setSelectedConversation(prev => {
             if (prev && prev.otherUser.id === data.userId) {
+              // Check if status actually changed to prevent unnecessary re-renders
+              if (prev.otherUser.status === data.status) {
+                console.log('🔄 Selected conversation status unchanged, skipping update');
+                return prev; // No change, return same object to prevent re-render
+              }
+              
+              console.log('🔄 Selected conversation status changed, updating');
               return {
                 ...prev,
                 otherUser: {
@@ -348,6 +473,7 @@ export default function ChatPage() {
             return prev;
           });
         });
+        } // End of handlersAttached check
 
 
         // Load conversations after socket is set up
@@ -394,7 +520,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (selectedConversation && socket) {
       selectedConversationRef.current = selectedConversation; // Update ref
-      setIsInitialLoad(true); // Set initial load flag for new conversation
+      setShouldScrollToBottom(true); // Trigger scroll for new conversation
       setCurrentPage(1); // Reset pagination
       setHasMoreMessages(false); // Reset pagination state
       loadMessages();
@@ -407,22 +533,16 @@ export default function ChatPage() {
     }
   }, [selectedConversation, socket]);
 
-  // Set isInitialLoad to false after messages are loaded and scrolled
+  // ULTRA-SIMPLE: Only scroll when conversation changes
   useEffect(() => {
-    if (messages.length > 0 && isInitialLoad) {
-      console.log('Setting isInitialLoad to false after messages loaded:', messages.length);
-      // Give more time for the scroll to complete
-      const timer = setTimeout(() => {
-        setIsInitialLoad(false);
-      }, 500);
-      return () => clearTimeout(timer);
+    if (selectedConversation) {
+      console.log('Conversation changed - triggering scroll to bottom');
+      setShouldScrollToBottom(true);
     }
-  }, [messages.length, isInitialLoad]);
+  }, [selectedConversation?.id]);
 
-  // Debug isInitialLoad changes
-  useEffect(() => {
-    console.log('isInitialLoad changed:', isInitialLoad);
-  }, [isInitialLoad]);
+  // ULTRA-SIMPLE: Only scroll when explicitly triggered
+  // No automatic detection - only manual triggers
 
   // Keep messagesRef in sync with messages state
   useEffect(() => {
@@ -1182,6 +1302,18 @@ export default function ChatPage() {
     setViewingImage({url, fileName, mediaId});
   }, []);
 
+  // SIMPLE: Handle scroll completion
+  const handleScrollComplete = useCallback(() => {
+    console.log('Scroll to bottom completed');
+    setShouldScrollToBottom(false);
+  }, []);
+
+  // ULTRA-SIMPLE: Manual trigger for new message scroll
+  const triggerScrollForNewMessage = useCallback(() => {
+    console.log('Manual trigger for new message scroll');
+    setShouldScrollToBottom(true);
+  }, []);
+
   const downloadImage = useCallback(async (mediaId: string, fileName: string) => {
     setIsDownloading(true);
     try {
@@ -1369,10 +1501,12 @@ export default function ChatPage() {
                 formatTime={formatTime}
                 getMediaViewUrl={getMediaViewUrl}
                 onImageClick={handleImageClick}
-                isInitialLoad={isInitialLoad}
                 hasMoreMessages={hasMoreMessages}
                 isLoadingMore={isLoadingMore}
                 onLoadMore={loadMoreMessages}
+                shouldScrollToBottom={shouldScrollToBottom}
+                onScrollComplete={handleScrollComplete}
+                onScrollToBottom={triggerScrollForNewMessage}
               />
             )}
             
