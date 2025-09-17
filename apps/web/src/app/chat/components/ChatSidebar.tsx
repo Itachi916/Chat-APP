@@ -105,33 +105,44 @@ export default function ChatSidebar({
 
       {/* Search Results */}
       {showSearch && (
-        <div className="border-b max-h-60 overflow-y-auto">
+        <div className="border-b max-h-60 overflow-y-auto bg-gray-50">
+          <div className="px-3 py-2 bg-gray-100 border-b border-gray-200">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Search Results</p>
+          </div>
           {Array.isArray(searchResults) && searchResults.map((user) => (
             <div
               key={user.id}
               onClick={() => onCreateConversation(user.id)}
-              className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100"
+              className="p-3 hover:bg-blue-50 cursor-pointer border-b border-gray-200 bg-white mx-2 my-1 rounded-lg shadow-sm transition-colors duration-150"
             >
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-300 rounded-full flex items-center justify-center">
+                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center border-2 border-blue-200">
                   {user.avatar ? (
                     <img src={user.avatar} alt={user.displayName} className="w-10 h-10 rounded-full" />
                   ) : (
-                    <span className="text-gray-600 font-semibold">
+                    <span className="text-blue-600 font-semibold">
                       {user.displayName.charAt(0).toUpperCase()}
                     </span>
                   )}
                 </div>
                 <div className="flex-1">
-                  <p className="font-semibold text-gray-800">{user.username}</p>
-                  <p className="text-sm text-gray-600">{user.displayName}</p>
+                  <p className="font-semibold text-blue-800">{user.username}</p>
+                  <p className="text-sm text-blue-600">{user.displayName}</p>
                 </div>
-                <div className={`w-3 h-3 rounded-full ${
-                  user.status === 'ONLINE' ? 'bg-green-400' : 'bg-gray-400'
-                }`}></div>
+                <div className="flex items-center space-x-2">
+                  <div className={`w-3 h-3 rounded-full ${
+                    user.status === 'ONLINE' ? 'bg-green-400' : 'bg-gray-400'
+                  }`}></div>
+                  <span className="text-xs text-blue-500 font-medium">Start Chat</span>
+                </div>
               </div>
             </div>
           ))}
+          {searchResults.length === 0 && searchQuery && (
+            <div className="p-4 text-center text-gray-500">
+              <p className="text-sm">No users found for "{searchQuery}"</p>
+            </div>
+          )}
         </div>
       )}
 

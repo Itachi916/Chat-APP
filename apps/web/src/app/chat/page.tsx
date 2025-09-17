@@ -11,6 +11,7 @@ import dynamic from 'next/dynamic';
 import { User, Conversation, Message, Media, MessageReceipt } from './types';
 import MessageList from './components/MessageList';
 import MessageInput from './components/MessageInput';
+import VideoUploadProgress from './components/VideoUploadProgress';
 
 // Dynamic imports for better code splitting
 const ChatSidebar = dynamic(() => import('./components/ChatSidebar'), {
@@ -45,10 +46,20 @@ export default function ChatPage() {
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState<{
+    isUploading: boolean;
+    progress: number;
+    fileName: string;
+    fileSize: number;
+    thumbnail: string;
+    mediaId?: string;
+  } | null>(null);
   
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const selectedConversationRef = useRef<Conversation | null>(null);
   const messageIdsRef = useRef<Set<string>>(new Set());
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isCancellingRef = useRef<boolean>(false);
 
   // Redirect to landing page if not authenticated
   useEffect(() => {
@@ -410,6 +421,16 @@ export default function ChatPage() {
     console.log('isInitialLoad changed:', isInitialLoad);
   }, [isInitialLoad]);
 
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
   // Handle visibility change and focus (when user returns to chat)
   useEffect(() => {
     const handlePresence = () => {
@@ -744,6 +765,8 @@ export default function ChatPage() {
       const url = URL.createObjectURL(file);
       setPreviewUrl(url);
     }
+    // Reset the input value to allow selecting the same file again
+    event.target.value = '';
   }, []);
 
   // Calculate MD5 hash of file content using Web Crypto API
@@ -772,16 +795,53 @@ export default function ChatPage() {
   const uploadMedia = async (file: File) => {
     if (!selectedConversation) return;
 
+    // Clean up any existing abort controller
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    // Create abort controller for cancellation
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    // Create thumbnail for video files - always create fresh URL
+    let thumbnail = '';
+    if (file.type.startsWith('video/')) {
+      try {
+        // Revoke any existing URL to prevent memory leaks
+        if (videoUploadProgress?.thumbnail) {
+          URL.revokeObjectURL(videoUploadProgress.thumbnail);
+        }
+        thumbnail = URL.createObjectURL(file);
+        console.log('Created fresh thumbnail URL:', thumbnail);
+      } catch (error) {
+        console.error('Failed to create thumbnail URL:', error);
+        thumbnail = '';
+      }
+    }
+
+    // Initialize upload progress
+    setVideoUploadProgress({
+      isUploading: true,
+      progress: 0,
+      fileName: file.name,
+      fileSize: file.size,
+      thumbnail,
+    });
+
     try {
       const token = await user?.getIdToken();
       
-      // Step 1: Calculate content hash
+      // Step 1: Calculate content hash (10% progress)
       console.log('Calculating file hash...');
+      setVideoUploadProgress(prev => prev ? { ...prev, progress: 10 } : null);
       const contentHash = await calculateFileHash(file);
       console.log('File hash:', contentHash);
 
-      // Step 2: Check for duplicates
+      // Step 2: Check for duplicates (20% progress)
       console.log('Checking for duplicates...');
+      setVideoUploadProgress(prev => prev ? { ...prev, progress: 20 } : null);
       const duplicateCheckResponse = await fetch(
         `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/check-duplicate/${selectedConversation.id}`,
         {
@@ -795,20 +855,26 @@ export default function ChatPage() {
             fileName: file.name,
             fileType: file.type,
           }),
+          signal: abortController.signal,
         }
-      );
+      ).catch(error => {
+        if (error.name === 'AbortError') {
+          throw new Error('Upload cancelled');
+        }
+        throw error;
+      });
 
       if (!duplicateCheckResponse.ok) {
         throw new Error('Failed to check for duplicates');
       }
 
       const duplicateCheck = await duplicateCheckResponse.json();
-
       let mediaId: string;
 
       if (duplicateCheck.isDuplicate && duplicateCheck.existingMedia) {
-        // Step 3a: File is duplicate, create new media record pointing to existing S3 file
+        // Step 3a: File is duplicate (30% progress)
         console.log('File is duplicate, creating new media record...');
+        setVideoUploadProgress(prev => prev ? { ...prev, progress: 30 } : null);
         const duplicateResponse = await fetch(
           `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/create-duplicate-media/${selectedConversation.id}`,
           {
@@ -822,8 +888,14 @@ export default function ChatPage() {
               fileName: file.name,
               fileType: file.type,
             }),
+            signal: abortController.signal,
           }
-        );
+        ).catch(error => {
+          if (error.name === 'AbortError') {
+            throw new Error('Upload cancelled');
+          }
+          throw error;
+        });
 
         if (!duplicateResponse.ok) {
           throw new Error('Failed to create duplicate media record');
@@ -831,10 +903,12 @@ export default function ChatPage() {
 
         const duplicateResult = await duplicateResponse.json();
         mediaId = duplicateResult.id;
+        setVideoUploadProgress(prev => prev ? { ...prev, mediaId, progress: 50 } : null);
         console.log('Duplicate file handled:', duplicateResult);
       } else {
-        // Step 3b: File is not duplicate, get presigned URL and upload
+        // Step 3b: File is not duplicate, get presigned URL (30% progress)
         console.log('File is unique, getting presigned URL...');
+        setVideoUploadProgress(prev => prev ? { ...prev, progress: 30 } : null);
         const uploadResponse = await fetch(
           `${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/upload-url/${selectedConversation.id}`,
           {
@@ -848,8 +922,14 @@ export default function ChatPage() {
               fileType: file.type,
               contentHash,
             }),
+            signal: abortController.signal,
           }
-        );
+        ).catch(error => {
+          if (error.name === 'AbortError') {
+            throw new Error('Upload cancelled');
+          }
+          throw error;
+        });
 
         if (!uploadResponse.ok) {
           const errorText = await uploadResponse.text();
@@ -859,72 +939,189 @@ export default function ChatPage() {
 
         const { uploadUrl, mediaId: newMediaId } = await uploadResponse.json();
         mediaId = newMediaId;
+        setVideoUploadProgress(prev => prev ? { ...prev, mediaId, progress: 40 } : null);
         console.log('Got presigned URL:', { uploadUrl, mediaId });
 
-        // Step 4: Upload file to S3
+        // Step 4: Upload file to S3 with progress tracking (40-80% progress)
         console.log('Uploading file to S3...');
-        const s3Response = await fetch(uploadUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type },
-          body: file,
+        const xhr = new XMLHttpRequest();
+        
+        return new Promise<void>((resolve, reject) => {
+          xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+              const uploadProgress = (event.loaded / event.total) * 40; // 40% of total progress
+              setVideoUploadProgress(prev => prev ? { 
+                ...prev, 
+                progress: Math.min(40 + uploadProgress, 80) 
+              } : null);
+            }
+          });
+
+          xhr.addEventListener('load', async () => {
+            if (xhr.status === 200) {
+              try {
+                // Step 5: Confirm upload and update media record (80-90% progress)
+                console.log('Confirming upload...');
+                setVideoUploadProgress(prev => prev ? { ...prev, progress: 80 } : null);
+                const confirmResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({
+                    mediaId,
+                    fileSize: file.size,
+                  }),
+                  signal: abortController.signal,
+                });
+
+                if (!confirmResponse.ok) {
+                  const errorText = await confirmResponse.text();
+                  console.error('Confirm upload error response:', errorText);
+                  throw new Error(`Confirm upload failed: ${confirmResponse.status} - ${errorText}`);
+                }
+
+                // Step 6: Send message with media (90-100% progress)
+                console.log('Creating message with media...');
+                setVideoUploadProgress(prev => prev ? { ...prev, progress: 90 } : null);
+                const messageResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({
+                    conversationId: selectedConversation.id,
+                    messageType: file.type.startsWith('video/') ? 'VIDEO' : 'IMAGE',
+                    mediaIds: [mediaId],
+                  }),
+                  signal: abortController.signal,
+                });
+
+                if (!messageResponse.ok) {
+                  const errorText = await messageResponse.text();
+                  console.error('Message creation error response:', errorText);
+                  throw new Error(`Message creation failed: ${messageResponse.status} - ${errorText}`);
+                }
+
+                setVideoUploadProgress(prev => prev ? { ...prev, progress: 100 } : null);
+                setSelectedFile(null);
+                setPreviewUrl(null);
+                abortControllerRef.current = null;
+                console.log('Media upload completed successfully');
+                
+                // Clear progress after a short delay
+                setTimeout(() => {
+                  // Clean up thumbnail URL
+                  if (videoUploadProgress?.thumbnail) {
+                    URL.revokeObjectURL(videoUploadProgress.thumbnail);
+                  }
+                  setVideoUploadProgress(null);
+                }, 1000);
+                
+                resolve();
+              } catch (error) {
+                console.error('=== MEDIA UPLOAD FAILED ===', error);
+                setVideoUploadProgress(null);
+                abortControllerRef.current = null;
+                reject(error);
+              }
+            } else {
+              console.error('S3 upload failed:', xhr.status, xhr.statusText);
+              setVideoUploadProgress(null);
+              abortControllerRef.current = null;
+              reject(new Error(`S3 upload failed: ${xhr.status}`));
+            }
+          });
+
+          xhr.addEventListener('error', () => {
+            console.error('S3 upload failed');
+            setVideoUploadProgress(null);
+            abortControllerRef.current = null;
+            reject(new Error('S3 upload failed'));
+          });
+
+          xhr.addEventListener('abort', () => {
+            if (isCancellingRef.current) {
+              console.log('Upload cancelled by user');
+            } else {
+              console.log('Upload cancelled');
+            }
+            setVideoUploadProgress(null);
+            abortControllerRef.current = null;
+            // Don't reject with error for intentional cancellation
+            resolve();
+          });
+
+          xhr.open('PUT', uploadUrl);
+          xhr.setRequestHeader('Content-Type', file.type);
+          xhr.send(file);
         });
-
-        if (!s3Response.ok) {
-          console.error('S3 upload failed:', s3Response.status, s3Response.statusText);
-          throw new Error(`S3 upload failed: ${s3Response.status}`);
-        }
-
-        // Step 5: Confirm upload and update media record
-        console.log('Confirming upload...');
-        const confirmResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/confirm-upload`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            mediaId,
-            fileSize: file.size,
-          }),
-        });
-
-        if (!confirmResponse.ok) {
-          const errorText = await confirmResponse.text();
-          console.error('Confirm upload error response:', errorText);
-          throw new Error(`Confirm upload failed: ${confirmResponse.status} - ${errorText}`);
-        }
-      }
-
-      // Step 6: Send message with media
-      console.log('Creating message with media...');
-      const messageResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          conversationId: selectedConversation.id,
-          messageType: file.type.startsWith('video/') ? 'VIDEO' : 'IMAGE',
-          mediaIds: [mediaId],
-        }),
-      });
-
-      if (!messageResponse.ok) {
-        const errorText = await messageResponse.text();
-        console.error('Message creation error response:', errorText);
-        throw new Error(`Message creation failed: ${messageResponse.status} - ${errorText}`);
-      }
-
-      if (messageResponse.ok) {
-        setSelectedFile(null);
-        setPreviewUrl(null);
-        console.log('Media upload completed successfully');
       }
     } catch (error) {
-      console.error('=== MEDIA UPLOAD FAILED ===', error);
+      if (isCancellingRef.current || (error instanceof Error && error.message === 'Upload cancelled')) {
+        console.log('Upload was cancelled by user');
+      } else {
+        console.error('=== MEDIA UPLOAD FAILED ===', error);
+      }
+      setVideoUploadProgress(null);
+      abortControllerRef.current = null;
     }
   };
+
+  const cancelUpload = useCallback(() => {
+    // Set cancellation flag
+    isCancellingRef.current = true;
+    
+    // Capture the mediaId and thumbnail before clearing state
+    const mediaId = videoUploadProgress?.mediaId;
+    const thumbnail = videoUploadProgress?.thumbnail;
+    
+    // Clean up thumbnail URL if it exists
+    if (thumbnail) {
+      URL.revokeObjectURL(thumbnail);
+    }
+    
+    // Immediately clean up state to prevent further operations
+    setVideoUploadProgress(null);
+    setSelectedFile(null);
+    setPreviewUrl(null);
+    
+    // Abort the current upload
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    
+    // Clean up database asynchronously without abort signal
+    if (mediaId) {
+      (async () => {
+        try {
+          const token = await user?.getIdToken();
+          await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/cancel-upload`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              mediaId: mediaId,
+            }),
+          });
+        } catch (error) {
+          // Silently handle cleanup errors
+          console.log('Cleanup completed (some operations may have failed)');
+        } finally {
+          // Reset cancellation flag
+          isCancellingRef.current = false;
+        }
+      })();
+    } else {
+      // Reset cancellation flag if no mediaId
+      isCancellingRef.current = false;
+    }
+  }, [videoUploadProgress?.mediaId, user]);
 
   const formatTime = useCallback((timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1151,7 +1348,7 @@ export default function ChatPage() {
             )}
 
             {/* File Preview */}
-            {previewUrl && selectedFile && (
+            {previewUrl && selectedFile && !videoUploadProgress && (
               <div className="p-4 border-t bg-gray-50">
                 <div className="flex items-center space-x-4">
                   {selectedFile.type.startsWith('image/') ? (
@@ -1184,6 +1381,18 @@ export default function ChatPage() {
               </div>
             )}
 
+            {/* Video Upload Progress */}
+            {videoUploadProgress && (
+              <VideoUploadProgress
+                isUploading={videoUploadProgress.isUploading}
+                progress={videoUploadProgress.progress}
+                fileName={videoUploadProgress.fileName}
+                fileSize={videoUploadProgress.fileSize}
+                thumbnail={videoUploadProgress.thumbnail}
+                onCancel={cancelUpload}
+              />
+            )}
+
             {/* Message Input */}
             <MessageInput
               newMessage={newMessage}
@@ -1198,13 +1407,7 @@ export default function ChatPage() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <h2 className="text-2xl font-bold text-gray-800 mb-4">Welcome to Chat App</h2>
-              <p className="text-gray-600 mb-6">Select a conversation or start a new chat</p>
-              <button
-                onClick={() => setShowSearch(true)}
-                className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700"
-              >
-                Start New Chat
-              </button>
+              <p className="text-gray-600">Select a conversation to get started</p>
             </div>
           </div>
         )}

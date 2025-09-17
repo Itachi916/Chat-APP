@@ -560,5 +560,57 @@ router.post('/security-logout', authenticateToken, async (req: AuthenticatedRequ
   }
 });
 
+// Cancel upload and clean up database
+router.post('/cancel-upload', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { mediaId } = req.body;
+    
+    if (!mediaId) {
+      return res.status(400).json({ error: 'Media ID is required' });
+    }
+
+    // Find the media record
+    const media = await prisma.media.findUnique({
+      where: { id: mediaId },
+      include: { conversation: true }
+    });
+
+    if (!media) {
+      return res.status(404).json({ error: 'Media not found' });
+    }
+
+    // Check if user has access to this conversation
+    if (!media.conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    const hasAccess = media.conversation.user1Id === req.user?.uid || 
+                     media.conversation.user2Id === req.user?.uid;
+    
+    if (!hasAccess) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Check if this media is still being uploaded (not confirmed yet)
+    // If it has a messageId, it means it's already been attached to a message
+    if (media.messageId) {
+      return res.status(400).json({ error: 'Media already uploaded, cannot cancel' });
+    }
+
+    // Delete the media record from database
+    await prisma.media.delete({
+      where: { id: mediaId }
+    });
+
+    // Note: We don't delete from S3 here because the file might not exist yet
+    // or might be cleaned up by S3 lifecycle policies for incomplete uploads
+
+    res.json({ message: 'Upload cancelled and cleaned up successfully' });
+  } catch (error) {
+    console.error('Cancel upload error:', error);
+    res.status(500).json({ error: 'Failed to cancel upload' });
+  }
+});
+
 export default router;
 
