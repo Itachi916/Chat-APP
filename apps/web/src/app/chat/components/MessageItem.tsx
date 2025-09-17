@@ -7,14 +7,14 @@ interface MessageItemProps {
   onDeleteMessage: (messageId: string) => void;
   formatTime: (timestamp: string) => string;
   getMediaViewUrl: (mediaId: string) => Promise<string | null>;
-  onImageClick: (url: string, fileName: string) => void;
+  onImageClick: (url: string, fileName: string, mediaId: string) => void;
 }
 
 // Memoized media components with proper URL fetching
 const MediaImage = memo(({ media, getMediaViewUrl, onImageClick }: { 
   media: Media; 
   getMediaViewUrl: (mediaId: string) => Promise<string | null>;
-  onImageClick: (url: string, fileName: string) => void;
+  onImageClick: (url: string, fileName: string, mediaId: string) => void;
 }) => {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -62,8 +62,9 @@ const MediaImage = memo(({ media, getMediaViewUrl, onImageClick }: {
       <img
         src={imageUrl}
         alt={media.fileName}
-        className="max-w-full h-auto rounded-lg cursor-pointer"
-        onClick={() => onImageClick(imageUrl, media.fileName)}
+        className="max-w-full max-h-96 w-auto h-auto rounded-lg cursor-pointer object-contain"
+        style={{ maxWidth: '400px', maxHeight: '400px' }}
+        onClick={() => onImageClick(imageUrl, media.fileName, media.id)}
       />
       <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all duration-200 rounded-lg flex items-center justify-center pointer-events-none">
         <span className="text-white opacity-0 group-hover:opacity-100 text-sm">Click to view</span>

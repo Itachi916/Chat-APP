@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { getPresignedUploadUrl, getPresignedDownloadUrl } from '../s3';
+import { getPresignedUploadUrl, getPresignedDownloadUrl, s3 } from '../s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { prisma } from '../lib/prisma';
 import { authenticateToken, validateConversationAccess, AuthenticatedRequest } from '../middleware/auth';
 
@@ -360,6 +361,106 @@ router.get('/view-url/:mediaId', authenticateToken, async (req: AuthenticatedReq
   } catch (error) {
     console.error('View URL error:', error);
     res.status(500).json({ error: 'Failed to generate view URL' });
+  }
+});
+
+// Direct download endpoint that streams the file through the server
+router.get('/download/:mediaId', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { mediaId } = req.params;
+    console.log('Download request for mediaId:', mediaId);
+
+    const currentUser = await prisma.user.findUnique({
+      where: { firebaseUid: req.user!.uid },
+      select: { id: true }
+    });
+
+    if (!currentUser) {
+      console.log('User not found for UID:', req.user!.uid);
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const media = await prisma.media.findFirst({
+      where: {
+        id: mediaId,
+        OR: [
+          { conversation: { user1Id: currentUser.id } },
+          { conversation: { user2Id: currentUser.id } }
+        ]
+      },
+      include: { conversation: true }
+    });
+
+    if (!media) {
+      console.log('Media not found or access denied for mediaId:', mediaId, 'userId:', currentUser.id);
+      return res.status(404).json({ error: 'Media not found or access denied' });
+    }
+
+    console.log('Found media:', { 
+      id: media.id, 
+      fileName: media.fileName, 
+      s3Key: media.s3Key, 
+      fileType: media.fileType 
+    });
+
+    // Get the file from S3
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME!,
+      Key: media.s3Key
+    });
+    
+    console.log('S3 config:', { 
+      bucket: process.env.S3_BUCKET_NAME, 
+      key: media.s3Key 
+    });
+    
+    const s3Object = await s3.send(command);
+    console.log('S3 object retrieved, content length:', s3Object.ContentLength);
+
+    // Set appropriate headers for download
+    res.setHeader('Content-Type', media.fileType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${media.fileName}"`);
+    res.setHeader('Content-Length', s3Object.ContentLength || 0);
+
+    // Convert the stream to buffer and send
+    if (s3Object.Body) {
+      try {
+        // Convert the stream to a buffer
+        const chunks: Buffer[] = [];
+        const stream = s3Object.Body as any;
+        
+        // Handle the stream
+        if (stream.on) {
+          // It's a Node.js stream
+          await new Promise((resolve, reject) => {
+            stream.on('data', (chunk: Buffer) => {
+              chunks.push(chunk);
+            });
+            stream.on('end', () => {
+              resolve(void 0);
+            });
+            stream.on('error', (err: Error) => {
+              reject(err);
+            });
+          });
+          
+          const buffer = Buffer.concat(chunks);
+          res.send(buffer);
+        } else {
+          // Try to convert to string and then to buffer
+          const bodyString = await s3Object.Body.toString();
+          res.send(Buffer.from(bodyString, 'binary'));
+        }
+      } catch (streamError) {
+        console.error('Error processing S3 body:', streamError);
+        throw new Error('Failed to process file content');
+      }
+    } else {
+      throw new Error('No body in S3 response');
+    }
+  } catch (error) {
+    console.error('Download error details:', error);
+    res.status(500).json({ error: 'Failed to download file' });
   }
 });
 

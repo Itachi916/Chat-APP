@@ -8,7 +8,7 @@ interface MessageListProps {
   onDeleteMessage: (messageId: string) => void;
   formatTime: (timestamp: string) => string;
   getMediaViewUrl: (mediaId: string) => Promise<string | null>;
-  onImageClick: (url: string, fileName: string) => void;
+  onImageClick: (url: string, fileName: string, mediaId: string) => void;
   isInitialLoad?: boolean;
   hasMoreMessages?: boolean;
   isLoadingMore?: boolean;

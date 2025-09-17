@@ -36,7 +36,8 @@ export default function ChatPage() {
   const [typingUsers, setTypingUsers] = useState<{[conversationId: string]: {username: string, displayName: string}}>({});
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [viewingImage, setViewingImage] = useState<{url: string, fileName: string} | null>(null);
+  const [viewingImage, setViewingImage] = useState<{url: string, fileName: string, mediaId: string} | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [showSearch, setShowSearch] = useState(false);
@@ -572,7 +573,7 @@ export default function ChatPage() {
         // Prepend older messages to the beginning, avoiding duplicates
         setMessages(prev => {
           const existingIds = new Set(prev.map(msg => msg.id));
-          const newMessages = messages.filter(msg => !existingIds.has(msg.id));
+          const newMessages = messages.filter((msg: Message) => !existingIds.has(msg.id));
           console.log(`Loading ${newMessages.length} new messages out of ${messages.length} total`);
           return [...newMessages, ...prev];
         });
@@ -1177,9 +1178,55 @@ export default function ChatPage() {
     setNewMessage(value);
   }, []);
 
-  const handleImageClick = useCallback((url: string, fileName: string) => {
-    setViewingImage({url, fileName});
+  const handleImageClick = useCallback((url: string, fileName: string, mediaId: string) => {
+    setViewingImage({url, fileName, mediaId});
   }, []);
+
+  const downloadImage = useCallback(async (mediaId: string, fileName: string) => {
+    setIsDownloading(true);
+    try {
+      const token = await user?.getIdToken();
+      if (!token) {
+        throw new Error('No authentication token');
+      }
+
+      // Use the server download endpoint to avoid CORS issues
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/media/download/${mediaId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const blob = await response.blob();
+      
+      // Create a blob URL for download
+      const blobUrl = URL.createObjectURL(blob);
+      
+      // Create download link
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      
+      // Clean up
+      document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+      
+      console.log('Image downloaded successfully');
+    } catch (error) {
+      console.error('Failed to download image:', error);
+      alert('Failed to download image. Please try again.');
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [user]);
 
 
   // Function to get presigned URL for media viewing
@@ -1353,20 +1400,18 @@ export default function ChatPage() {
                     <h3 className="text-lg font-medium truncate">{viewingImage.fileName}</h3>
                     <div className="flex space-x-2">
                       <button
-                        onClick={() => {
-                          const link = document.createElement('a');
-                          link.href = viewingImage.url;
-                          link.download = viewingImage.fileName;
-                          document.body.appendChild(link);
-                          link.click();
-                          document.body.removeChild(link);
-                        }}
-                        className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-                        title="Download image"
+                        onClick={() => downloadImage(viewingImage.mediaId, viewingImage.fileName)}
+                        disabled={isDownloading}
+                        className="p-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed rounded-lg transition-colors"
+                        title={isDownloading ? "Downloading..." : "Download image"}
                       >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
+                        {isDownloading ? (
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                        ) : (
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                        )}
                       </button>
                       <button
                         onClick={() => setViewingImage(null)}
