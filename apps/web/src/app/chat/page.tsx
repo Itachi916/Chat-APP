@@ -46,6 +46,7 @@ export default function ChatPage() {
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [totalLoadedMessages, setTotalLoadedMessages] = useState(0);
   const [videoUploadProgress, setVideoUploadProgress] = useState<{
     isUploading: boolean;
     progress: number;
@@ -60,6 +61,7 @@ export default function ChatPage() {
   const messageIdsRef = useRef<Set<string>>(new Set());
   const abortControllerRef = useRef<AbortController | null>(null);
   const isCancellingRef = useRef<boolean>(false);
+  const messagesRef = useRef<Message[]>([]);
 
   // Redirect to landing page if not authenticated
   useEffect(() => {
@@ -421,6 +423,11 @@ export default function ChatPage() {
     console.log('isInitialLoad changed:', isInitialLoad);
   }, [isInitialLoad]);
 
+  // Keep messagesRef in sync with messages state
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   // Cleanup abort controller on unmount
   useEffect(() => {
     return () => {
@@ -509,7 +516,18 @@ export default function ChatPage() {
     
     try {
       const token = await user?.getIdToken();
-      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages/conversation/${selectedConversation.id}?page=${page}&limit=50`, {
+      
+      // Calculate the correct page based on how many messages we currently have loaded
+      let actualPage = page;
+      if (append) {
+        // When appending, we need to calculate the page based on current loaded messages
+        const messagesPerPage = 50;
+        const currentLoadedCount = messagesRef.current.length;
+        actualPage = Math.floor(currentLoadedCount / messagesPerPage) + 1;
+        console.log(`Current loaded messages: ${currentLoadedCount}, calculating page: ${actualPage}`);
+      }
+      
+      const response = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/messages/conversation/${selectedConversation.id}?page=${actualPage}&limit=50`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -529,15 +547,35 @@ export default function ChatPage() {
       }
       
       const data = await response.json();
-      const messages = data.messages || [];
+      const rawMessages = data.messages || [];
       const pagination = data.pagination || {};
       
+      // Remove duplicates from the server response
+      const messages = rawMessages.filter((msg: Message, index: number, arr: Message[]) => 
+        arr.findIndex(m => m.id === msg.id) === index
+      );
+      
       // Update pagination state
-      setHasMoreMessages(page < pagination.pages);
+      if (append) {
+        // When appending, check if we got fewer messages than requested (indicating we've reached the end)
+        const hasMore = messages.length === 50;
+        setHasMoreMessages(hasMore);
+        console.log(`Append: Got ${messages.length} messages, hasMore: ${hasMore}`);
+      } else {
+        // For initial load, use the server's pagination info
+        const hasMore = actualPage < pagination.pages;
+        setHasMoreMessages(hasMore);
+        console.log(`Initial load: Page ${actualPage}/${pagination.pages}, hasMore: ${hasMore}`);
+      }
       
       if (append) {
-        // Prepend older messages to the beginning
-        setMessages(prev => [...messages, ...prev]);
+        // Prepend older messages to the beginning, avoiding duplicates
+        setMessages(prev => {
+          const existingIds = new Set(prev.map(msg => msg.id));
+          const newMessages = messages.filter(msg => !existingIds.has(msg.id));
+          console.log(`Loading ${newMessages.length} new messages out of ${messages.length} total`);
+          return [...newMessages, ...prev];
+        });
       } else {
         // Replace messages (initial load)
         setMessages(messages);
@@ -548,10 +586,19 @@ export default function ChatPage() {
         });
       }
       
-      // Add new message IDs to the ref
-      messages.forEach((msg: Message) => {
-        messageIdsRef.current.add(msg.id);
-      });
+      // Add new message IDs to the ref (only for new messages)
+      if (append) {
+        const existingIds = messageIdsRef.current;
+        messages.forEach((msg: Message) => {
+          if (!existingIds.has(msg.id)) {
+            messageIdsRef.current.add(msg.id);
+          }
+        });
+      } else {
+        messages.forEach((msg: Message) => {
+          messageIdsRef.current.add(msg.id);
+        });
+      }
       
     } catch (error) {
       console.error('Failed to load messages:', error);
@@ -569,12 +616,11 @@ export default function ChatPage() {
     if (!hasMoreMessages || isLoadingMore) return;
     
     setIsLoadingMore(true);
-    const nextPage = currentPage + 1;
-    setCurrentPage(nextPage);
     
-    await loadMessages(nextPage, true);
+    // Don't increment currentPage, let loadMessages calculate the correct page
+    await loadMessages(1, true); // page parameter is ignored when append=true
     setIsLoadingMore(false);
-  }, [hasMoreMessages, isLoadingMore, currentPage, loadMessages]);
+  }, [hasMoreMessages, isLoadingMore, loadMessages]);
 
   const searchUsers = useCallback(async (query: string) => {
     if (!query.trim()) {
