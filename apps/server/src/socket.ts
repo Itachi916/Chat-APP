@@ -341,14 +341,6 @@ export function setupSocketHandlers(io: SocketIOServer) {
           const moderationResult = moderateMessage(content);
           
           if (moderationResult.isBlocked) {
-            // Log the attempt for monitoring
-            const detectedNumbers = extractPhoneNumbers(content);
-            console.log(`[MODERATION] Phone number blocked from user ${socket.data.userId}:`, {
-              detectedNumbers,
-              reason: moderationResult.reason,
-              content: content.substring(0, 100) + (content.length > 100 ? '...' : '')
-            });
-            
             // Send error back to client
             socket.emit('message-blocked', {
               reason: moderationResult.reason,

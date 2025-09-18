@@ -38,6 +38,18 @@ export interface ModerationResult {
 export function containsPhoneNumber(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   
+  // FIRST: Check for 7+ digits in any sequence (ASCII 48-57 for 0-9)
+  let digitCounter = 0;
+  for (let i = 0; i < text.length; i++) {
+    const charCode = text.charCodeAt(i);
+    if (charCode >= 48 && charCode <= 57) { // ASCII for 0-9
+      digitCounter++;
+      if (digitCounter >= 7) {
+        return true;
+      }
+    }
+  }
+  
   // Check all phone number patterns
   for (const pattern of PHONE_PATTERNS) {
     if (pattern.test(text)) {

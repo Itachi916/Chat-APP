@@ -127,14 +127,14 @@ export default function Home() {
           </div>
 
           {/* Features Grid */}
-          <div className="grid md:grid-cols-3 gap-8 mb-16">
+          <div className="grid md:grid-cols-2 gap-8 mb-16 max-w-4xl mx-auto">
             <div className="bg-gray-50 p-8 rounded-xl">
               <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <span className="text-2xl">⚡</span>
               </div>
               <h3 className="text-xl font-semibold text-gray-900 mb-3">Real-time</h3>
               <p className="text-gray-600">
-                Instant messaging with live typing indicators and message delivery status
+                Instant messaging with live typing indicators
               </p>
             </div>
             
@@ -148,20 +148,11 @@ export default function Home() {
               </p>
             </div>
             
-            <div className="bg-gray-50 p-8 rounded-xl">
-              <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <span className="text-2xl">📱</span>
-              </div>
-              <h3 className="text-xl font-semibold text-gray-900 mb-3">Modern</h3>
-              <p className="text-gray-600">
-                Beautiful, responsive design that works on all devices
-              </p>
-            </div>
           </div>
 
           {/* Additional Features */}
-          <div className="grid md:grid-cols-2 gap-12 items-center">
-            <div className="text-left">
+          <div className="max-w-4xl mx-auto text-center">
+            <div>
               <h2 className="text-3xl font-bold text-gray-900 mb-4">
                 Share Everything
               </h2>
@@ -169,11 +160,7 @@ export default function Home() {
                 Send text messages, photos, videos, and files. Express yourself with 
                 emojis, stickers, and more. Everything you need for modern communication.
               </p>
-              <ul className="space-y-3">
-                <li className="flex items-center space-x-3">
-                  <div className="w-2 h-2 bg-blue-600 rounded-full"></div>
-                  <span className="text-gray-700">Text and voice messages</span>
-                </li>
+              <ul className="space-y-3 flex flex-col items-center">
                 <li className="flex items-center space-x-3">
                   <div className="w-2 h-2 bg-blue-600 rounded-full"></div>
                   <span className="text-gray-700">Photo and video sharing</span>
@@ -182,28 +169,9 @@ export default function Home() {
                   <div className="w-2 h-2 bg-blue-600 rounded-full"></div>
                   <span className="text-gray-700">File sharing</span>
                 </li>
-                <li className="flex items-center space-x-3">
-                  <div className="w-2 h-2 bg-blue-600 rounded-full"></div>
-                  <span className="text-gray-700">Group conversations</span>
-                </li>
               </ul>
             </div>
             
-            <div className="bg-gray-100 rounded-2xl p-8 text-center">
-              <div className="w-32 h-32 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <span className="text-6xl">💬</span>
-              </div>
-              <h3 className="text-xl font-semibold text-gray-900 mb-2">Ready to Chat?</h3>
-              <p className="text-gray-600 mb-4">
-                Join thousands of users already chatting
-              </p>
-              <button
-                onClick={() => router.push('/auth')}
-                className="bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 transition-colors"
-              >
-                Start Chatting Now
-              </button>
-      </div>
           </div>
       </div>
       </main>
