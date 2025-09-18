@@ -1506,7 +1506,6 @@ export default function ChatPage() {
                 onLoadMore={loadMoreMessages}
                 shouldScrollToBottom={shouldScrollToBottom}
                 onScrollComplete={handleScrollComplete}
-                onScrollToBottom={triggerScrollForNewMessage}
               />
             )}
             

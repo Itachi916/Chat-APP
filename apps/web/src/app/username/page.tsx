@@ -132,6 +132,10 @@ export default function UsernamePage() {
         const data = await response.json();
         if (data.error === 'Username already taken') {
           setError('Username is already taken. Please choose a different one.');
+        } else if (data.error === 'An account with this email already exists') {
+          setError('An account with this email already exists');
+        } else if (data.error === 'Email is required for account creation') {
+          setError('Email is required for account creation. Please sign out and sign in again.');
         } else {
           setError('Failed to create profile. Please try again.');
         }
@@ -234,6 +238,19 @@ export default function UsernamePage() {
             {error && (
               <div className="text-red-600 text-sm text-center">
                 {error}
+                {error.includes('account with this email already exists') && (
+                  <div className="mt-2">
+                    <button
+                      onClick={() => {
+                        auth.signOut();
+                        router.push('/auth');
+                      }}
+                      className="text-blue-600 hover:text-blue-800 underline text-sm"
+                    >
+                      Sign out and use existing account
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

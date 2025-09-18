@@ -58,6 +58,25 @@ export default function AuthPage() {
   const getErrorMessage = (error: any) => {
     const errorCode = error.code;
     
+    // For security reasons, group authentication errors together
+    const authErrors = [
+      'auth/user-not-found',
+      'auth/wrong-password', 
+      'auth/invalid-credential',
+      'auth/invalid-email',
+      'auth/user-disabled'
+    ];
+    
+    // Handle email already in use separately
+    if (errorCode === 'auth/email-already-in-use') {
+      return 'An account with this email already exists';
+    }
+    
+    // If it's an authentication error, show generic message
+    if (authErrors.includes(errorCode)) {
+      return 'Wrong email or password. Please check your credentials and try again.';
+    }
+    
     switch (errorCode) {
       case 'auth/operation-not-allowed':
         return 'Email registration is not enabled. Please contact support.';
@@ -69,24 +88,15 @@ export default function AuthPage() {
         return 'Network error. Please check your internet connection and try again.';
       case 'auth/too-many-requests':
         return 'Too many failed attempts. Please try again later.';
-      case 'auth/user-disabled':
-        return 'This account has been disabled. Please contact support.';
-      case 'auth/user-not-found':
-        return 'No account found with this email. Please sign up first.';
-      case 'auth/wrong-password':
-        return 'Incorrect password. Please try again.';
       case 'auth/email-already-in-use':
         return 'An account with this email already exists. Please sign in instead.';
       case 'auth/weak-password':
         return 'Password is too weak. Please choose a stronger password (at least 6 characters).';
-      case 'auth/invalid-email':
-        return 'Please enter a valid email address.';
       case 'auth/missing-password':
         return 'Please enter a password.';
-      case 'auth/invalid-credential':
-        return 'Invalid email or password. Please check your credentials and try again.';
       default:
-        return 'An unexpected error occurred. Please try again.';
+        // For any other errors, show generic message to avoid exposing system details
+        return 'Wrong email or password. Please check your credentials and try again.';
     }
   };
 
@@ -103,24 +113,30 @@ export default function AuthPage() {
       console.log('Google sign in successful:', user.uid);
       
       // Check if user already has a profile
-      const token = await user.getIdToken();
-      console.log('Got token, checking profile...');
-      
-      const profileResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      try {
+        const token = await user.getIdToken();
+        console.log('Got token, checking profile...');
+        
+        const profileResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
 
-      console.log('Profile response status:', profileResponse.status);
+        console.log('Profile response status:', profileResponse.status);
 
-      if (profileResponse.ok) {
-        // User already has a profile, go to chat
-        console.log('Profile exists, redirecting to chat');
-        window.location.href = '/chat';
-      } else {
-        // User needs to set username, go to username page
-        console.log('No profile found, redirecting to username');
+        if (profileResponse.ok) {
+          // User already has a profile, go to chat
+          console.log('Profile exists, redirecting to chat');
+          window.location.href = '/chat';
+        } else {
+          // User needs to set username, go to username page
+          console.log('No profile found, redirecting to username');
+          window.location.href = '/username';
+        }
+      } catch (profileError) {
+        console.error('Profile check error:', profileError);
+        // On profile check error, go to username page
         window.location.href = '/username';
       }
     } catch (error: any) {
@@ -166,20 +182,26 @@ export default function AuthPage() {
         console.log('Login successful:', user.uid);
         
         // Check if user has profile
-        const token = await user.getIdToken();
-        const profileResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
+        try {
+          const token = await user.getIdToken();
+          const profileResponse = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/api/users/me`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
 
-        if (profileResponse.ok) {
-          // User has profile, go to chat
-          console.log('User has profile, redirecting to chat');
-          router.push('/chat');
-        } else {
-          // User needs to set username, go to username page
-          console.log('No profile found, redirecting to username');
+          if (profileResponse.ok) {
+            // User has profile, go to chat
+            console.log('User has profile, redirecting to chat');
+            router.push('/chat');
+          } else {
+            // User needs to set username, go to username page
+            console.log('No profile found, redirecting to username');
+            router.push('/username');
+          }
+        } catch (profileError) {
+          console.error('Profile check error:', profileError);
+          // On profile check error, go to username page
           router.push('/username');
         }
       } else {

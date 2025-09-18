@@ -14,7 +14,6 @@ interface MessageListProps {
   onLoadMore?: () => void;
   shouldScrollToBottom?: boolean;
   onScrollComplete?: () => void;
-  onScrollToBottom?: () => void;
 }
 
 const MessageList = memo(({ 
@@ -28,22 +27,16 @@ const MessageList = memo(({
   isLoadingMore = false,
   onLoadMore,
   shouldScrollToBottom = false,
-  onScrollComplete,
-  onScrollToBottom
+  onScrollComplete
 }: MessageListProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const previousScrollHeightRef = useRef<number>(0);
 
-  // SIMPLE: Only scroll when explicitly told to
+  // Handle scroll to bottom for new messages (not when loading previous messages)
   useEffect(() => {
-    if (shouldScrollToBottom && messages.length > 0 && containerRef.current) {
-      console.log('Explicit scroll to bottom requested');
-      
-      // Store current scroll position before loading more messages
-      if (isLoadingMore && containerRef.current) {
-        previousScrollHeightRef.current = containerRef.current.scrollHeight;
-      }
+    if (shouldScrollToBottom && messages.length > 0 && containerRef.current && !isLoadingMore) {
+      console.log('Explicit scroll to bottom requested for new message');
       
       // Scroll to bottom
       const scrollToBottom = () => {
@@ -65,15 +58,43 @@ const MessageList = memo(({
         }, 300);
       }
     }
-  }, [shouldScrollToBottom, messages.length, isLoadingMore, onScrollComplete]);
+  }, [shouldScrollToBottom, messages.length, onScrollComplete, isLoadingMore]);
 
   // Handle loading more messages - preserve scroll position
   useEffect(() => {
-    if (isLoadingMore && previousScrollHeightRef.current > 0 && containerRef.current) {
-      console.log('Restoring scroll position after loading more messages');
-      const heightDifference = containerRef.current.scrollHeight - previousScrollHeightRef.current;
-      containerRef.current.scrollTop = containerRef.current.scrollTop + heightDifference;
-      previousScrollHeightRef.current = 0;
+    if (isLoadingMore && containerRef.current) {
+      // Store current scroll position and height before loading more messages
+      const currentScrollTop = containerRef.current.scrollTop;
+      const currentScrollHeight = containerRef.current.scrollHeight;
+      
+      console.log('Storing scroll position before loading more messages:', {
+        scrollTop: currentScrollTop,
+        scrollHeight: currentScrollHeight
+      });
+      
+      // Store these values for restoration after messages load
+      previousScrollHeightRef.current = currentScrollHeight;
+      
+      // After messages are loaded, restore the scroll position
+      const restoreScrollPosition = () => {
+        if (containerRef.current && previousScrollHeightRef.current > 0) {
+          const heightDifference = containerRef.current.scrollHeight - previousScrollHeightRef.current;
+          const newScrollTop = currentScrollTop + heightDifference;
+          
+          console.log('Restoring scroll position after loading more messages:', {
+            oldScrollTop: currentScrollTop,
+            heightDifference,
+            newScrollTop,
+            newScrollHeight: containerRef.current.scrollHeight
+          });
+          
+          containerRef.current.scrollTop = newScrollTop;
+          previousScrollHeightRef.current = 0;
+        }
+      };
+      
+      // Use a small delay to ensure DOM has updated with new messages
+      setTimeout(restoreScrollPosition, 100);
     }
   }, [isLoadingMore]);
 
@@ -114,18 +135,6 @@ const MessageList = memo(({
         );
       })}
       <div ref={messagesEndRef} />
-      
-      {/* Simple scroll to bottom button */}
-      {onScrollToBottom && (
-        <div className="flex justify-center py-2">
-          <button
-            onClick={onScrollToBottom}
-            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm"
-          >
-            Scroll to Bottom
-          </button>
-        </div>
-      )}
     </div>
   );
 });

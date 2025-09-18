@@ -66,22 +66,40 @@ router.post('/profile', authenticateToken, async (req: AuthenticatedRequest, res
       return res.status(400).json({ error: 'Username and display name are required' });
     }
 
+    if (!req.user!.email) {
+      return res.status(400).json({ error: 'Email is required for account creation' });
+    }
+
+    // Check if email is already used by another user (different Firebase UID)
+    const existingEmailUser = await prisma.user.findFirst({
+      where: {
+        email: req.user!.email,
+        firebaseUid: { not: req.user!.uid },
+      },
+    });
+
+    if (existingEmailUser) {
+      return res.status(409).json({ 
+        error: 'An account with this email already exists' 
+      });
+    }
+
     // Check if username is already taken
-    const existingUser = await prisma.user.findFirst({
+    const existingUsernameUser = await prisma.user.findFirst({
       where: {
         username,
         firebaseUid: { not: req.user!.uid },
       },
     });
 
-    if (existingUser) {
+    if (existingUsernameUser) {
       return res.status(409).json({ error: 'Username already taken' });
     }
 
     const user = await prisma.user.upsert({
       where: { firebaseUid: req.user!.uid },
       update: {
-        email: req.user!.email || '',
+        email: req.user!.email,
         username,
         displayName,
         avatar,
@@ -89,7 +107,7 @@ router.post('/profile', authenticateToken, async (req: AuthenticatedRequest, res
       },
       create: {
         firebaseUid: req.user!.uid,
-        email: req.user!.email || '',
+        email: req.user!.email,
         username,
         displayName,
         avatar,
